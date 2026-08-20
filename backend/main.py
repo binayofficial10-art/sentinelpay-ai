@@ -65,8 +65,7 @@ def is_transient_gemini_error(error: Exception) -> bool:
     """Return whether one short retry is appropriate for a Gemini request."""
     status_code = get_gemini_error_status(error)
     return (
-        status_code == 429
-        or status_code is not None and 500 <= status_code < 600
+        status_code is not None and 500 <= status_code < 600
         or type(error).__name__ in {"ConnectError", "ReadTimeout", "TimeoutException"}
     )
 
@@ -221,6 +220,7 @@ def generate_gemini_assessment(transaction: Transaction) -> dict[str, Any]:
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=GeminiAssessmentSchema,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     for attempt in range(2):
