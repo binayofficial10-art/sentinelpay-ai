@@ -66,7 +66,7 @@ Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | No | Gemini API credential. Keep it only in `backend/.env` locally or your deployment secret manager. |
-| `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-3.6-flash`. |
+| `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-2.5-flash`. |
 | `PORT` | Local server only | Port supplied to Uvicorn when running locally. Vercel manages the production runtime. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated HTTPS frontend origins. Leave empty for the included same-origin frontend. |
 
