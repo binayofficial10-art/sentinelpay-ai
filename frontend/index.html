@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>SentinelPay AI</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <header class="navbar">
+        <div class="logo">
+            <span class="logo-icon">🛡️</span>
+            <div>
+                <h2>SentinelPay AI</h2>
+                <p>Intelligent Transaction Security</p>
+            </div>
+        </div>
+
+        <div class="status">
+            <span class="status-dot"></span>
+            AI ENGINE ONLINE
+        </div>
+    </header>
+
+
+    <main class="container">
+
+        <section class="hero">
+            <div>
+                <p class="tag">AI-POWERED FRAUD DETECTION</p>
+
+                <h1>
+                    Protect every transaction<br>
+                    with <span>AI intelligence.</span>
+                </h1>
+
+                <p class="hero-text">
+                    Analyze transactions in real time using behavioral
+                    signals, risk scoring and Gemini AI.
+                </p>
+            </div>
+        </section>
+
+
+        <section class="dashboard">
+
+            <!-- TRANSACTION FORM -->
+
+            <div class="card transaction-card">
+
+                <div class="card-header">
+                    <div>
+                        <p class="section-label">TRANSACTION ANALYSIS</p>
+                        <h2>Check Transaction</h2>
+                    </div>
+
+                    <span class="shield">🛡️</span>
+                </div>
+
+
+                <form id="transactionForm">
+
+                    <div class="form-grid">
+
+                        <div class="input-group">
+                            <label>Amount (₹)</label>
+
+                            <input
+                                type="number"
+                                id="amount"
+                                value="25000"
+                                required
+                            >
+                        </div>
+
+
+                        <div class="input-group">
+                            <label>Sender</label>
+
+                            <input
+                                type="text"
+                                id="sender"
+                                value="user123"
+                                required
+                            >
+                        </div>
+
+
+                        <div class="input-group">
+                            <label>Receiver</label>
+
+                            <input
+                                type="text"
+                                id="receiver"
+                                value="merchant456"
+                                required
+                            >
+                        </div>
+
+
+                        <div class="input-group">
+                            <label>Location</label>
+
+                            <input
+                                type="text"
+                                id="location"
+                                value="Bhubaneswar"
+                                required
+                            >
+                        </div>
+
+
+                        <div class="input-group">
+                            <label>Device</label>
+
+                            <select id="device">
+                                <option value="trusted">Trusted</option>
+                                <option value="unknown">Unknown</option>
+                                <option value="new">New Device</option>
+                            </select>
+                        </div>
+
+
+                        <div class="input-group">
+                            <label>Transaction Velocity</label>
+
+                            <input
+                                type="number"
+                                id="velocity"
+                                value="8"
+                                min="0"
+                                required
+                            >
+                        </div>
+
+                    </div>
+
+
+                    <button type="submit" id="checkButton">
+                        <span>🔍</span>
+                        CHECK TRANSACTION
+                    </button>
+
+                </form>
+
+            </div>
+
+
+            <!-- RISK RESULT -->
+
+            <div class="card result-card">
+
+                <p class="section-label">AI RISK ASSESSMENT</p>
+
+                <div id="riskResult" class="risk-result">
+                    <div class="risk-icon">🛡️</div>
+
+                    <h2 id="riskTitle">Awaiting Transaction</h2>
+
+                    <p id="riskSubtitle">
+                        Submit a transaction to receive an AI-powered risk assessment.
+                    </p>
+
+                    <div class="risk-score-container">
+                        <div class="risk-score-circle">
+                            <span id="riskScore">0</span>
+                            <small>/100</small>
+                        </div>
+
+                        <div class="risk-info">
+                            <div>
+                                <span>Risk Level</span>
+                                <strong id="riskLevel">—</strong>
+                            </div>
+
+                            <div>
+                                <span>Decision</span>
+                                <strong id="decision">—</strong>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="risk-bar">
+                        <div id="riskBar"></div>
+                    </div>
+
+                    <div class="explanation">
+                        <h3>🤖 AI Explanation</h3>
+                        <p id="riskExplanation">No transaction analyzed yet.</p>
+                    </div>
+                </div>
+
+                </div>
+
+        </section>
+
+
+        <!-- STATS -->
+
+        <section class="stats">
+
+            <div class="stat-card">
+                <span>🔍</span>
+                <div>
+                    <p>Transactions Checked</p>
+                    <h2 id="transactionCount">0</h2>
+                </div>
+            </div>
+
+
+            <div class="stat-card">
+                <span>🚨</span>
+                <div>
+                    <p>High Risk</p>
+                    <h2 id="highRiskCount">0</h2>
+                </div>
+            </div>
+
+
+            <div class="stat-card">
+                <span>✅</span>
+                <div>
+                    <p>Allowed</p>
+                    <h2 id="allowedCount">0</h2>
+                </div>
+            </div>
+
+
+            <div class="stat-card">
+                <span>⛔</span>
+                <div>
+                    <p>Blocked</p>
+                    <h2 id="blockedCount">0</h2>
+                </div>
+            </div>
+
+        </section>
+
+
+        <!-- HISTORY -->
+
+        <section class="card history">
+
+            <div class="card-header">
+
+                <div>
+                    <p class="section-label">MONITORING</p>
+                    <h2>Recent Transactions</h2>
+                </div>
+
+            </div>
+
+
+            <div class="table-container">
+
+                <table>
+
+                    <thead>
+                        <tr>
+                            <th>Sender</th>
+                            <th>Amount</th>
+                            <th>Risk</th>
+                            <th>Decision</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="historyBody">
+
+                        <tr>
+                            <td colspan="4" class="no-data">
+                                No transactions analyzed yet.
+                            </td>
+                        </tr>
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+    </main>
+
+
+    <footer>
+        <p>SentinelPay AI • AI-Powered Transaction Risk Engine</p>
+    </footer>
+
+
+    <script src="script.js?v=20260821-3"></script>
+
+</body>
+</html>
