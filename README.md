@@ -116,12 +116,12 @@ The fallback score is intentionally simple and explainable: higher amounts, rapi
 
 ## Deployment on Vercel
 
-The repository deploys as one Vercel FastAPI application. `api/index.py` exposes the existing `backend.main:app`; FastAPI serves both `/frontend/` and the API from the same Vercel HTTPS origin. The browser therefore posts to `/transaction/check` on its current origin, with no production localhost URL and no CORS configuration required for the included frontend.
+The repository deploys as one Vercel FastAPI application. `app.py` exposes the existing `backend.main:app`; FastAPI redirects `/` to the dashboard at `/frontend/` and serves the API from the same Vercel HTTPS origin. The browser therefore posts to `/transaction/check` on its current origin, with no production localhost URL and no CORS configuration required for the included frontend.
 
 ### Vercel deployment steps
 
 1. Sign in at [Vercel](https://vercel.com/new), select **Add New** > **Project**, and import the GitHub repository `binayofficial10-art/sentinelpay-ai`.
-2. Leave the project root as the repository root. Vercel detects `api/index.py`, installs the root `requirements.txt`, and uses Python `3.12` from `.python-version`.
+2. Leave the project root as the repository root. Vercel detects `app.py`, installs the root `requirements.txt`, and uses Python `3.12` from `.python-version`.
 3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` only if Gemini analysis is desired. Mark it for the desired Production/Preview environments; do not put it in source control or a frontend setting.
 4. Optionally add `GEMINI_MODEL` to select a supported Gemini model. If no key is supplied, the app safely uses its rule-based assessment.
 5. Click **Deploy**. On later updates, Vercel deploys new commits from the connected repository.
