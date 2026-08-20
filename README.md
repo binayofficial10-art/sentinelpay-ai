@@ -59,7 +59,7 @@ Set-Location backend
 .\venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/frontend/](http://127.0.0.1:8000/frontend/).
+Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/frontend/](http://127.0.0.1:8000/frontend/). For local use, start FastAPI as shown above so the frontend and API share one origin.
 
 ## Environment variables
 
@@ -68,6 +68,7 @@ Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/
 | `GEMINI_API_KEY` | No | Gemini API credential. Keep it only in `backend/.env` locally or your deployment secret manager. |
 | `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-3.6-flash`. |
 | `PORT` | Production platform | Port supplied by Render or another hosting provider. |
+| `CORS_ALLOWED_ORIGINS` | No | Comma-separated HTTPS frontend origins. Leave empty for the included same-origin frontend. |
 
 Never put `GEMINI_API_KEY` in frontend code, documentation examples, or Git commits.
 
@@ -115,13 +116,23 @@ The fallback score is intentionally simple and explainable: higher amounts, rapi
 
 ## Deployment on Render
 
-`render.yaml` is included for a single FastAPI web service. Connect the GitHub repository, create a Blueprint service, and set `GEMINI_API_KEY` as a secret environment variable in Render if Gemini is desired. The service uses:
+`render.yaml` is included for a single FastAPI web service. It serves both the dashboard and API from the same public HTTPS origin, so the browser calls `/transaction/check` without a cross-origin request. Connect the GitHub repository, create a Blueprint service, and set `GEMINI_API_KEY` as a secret environment variable in Render if Gemini is desired. The service uses:
 
 ```text
 cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 Render health check path: `/health`.
+
+### Render deployment steps
+
+1. In Render, select **New** > **Blueprint** and connect `binayofficial10-art/sentinelpay-ai`.
+2. Confirm the generated web service uses the repository `render.yaml`; Render installs `requirements.txt` and binds Uvicorn to its supplied `PORT`.
+3. Leave `GEMINI_API_KEY` unset to use explainable rule-based scoring, or add it in Render's **Environment** settings as a secret. Never place it in GitHub or frontend files.
+4. Deploy and open `https://<your-render-service>.onrender.com/frontend/`. Check `https://<your-render-service>.onrender.com/health` returns `{"status":"ok"}`.
+5. Submit a transaction in the dashboard and confirm the result is returned by `POST /transaction/check` on the same URL origin.
+
+For a deliberately separate frontend host, set the `sentinelpay-api-base-url` meta tag in `frontend/index.html` to the API's HTTPS URL and set `CORS_ALLOWED_ORIGINS` in Render to the exact frontend HTTPS origin. Do not use `*` for CORS.
 
 ## Usage
 

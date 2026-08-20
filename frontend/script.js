@@ -1,11 +1,9 @@
 console.log("SentinelPay script loaded");
 
-const isLocalDevelopment =
-    ["127.0.0.1", "localhost"].includes(window.location.hostname) &&
-    window.location.port === "5500";
-const API_URL = isLocalDevelopment
-    ? "http://127.0.0.1:8000"
-    : window.location.origin;
+const configuredApiBaseUrl = document
+    .querySelector('meta[name="sentinelpay-api-base-url"]')
+    ?.content.trim();
+const API_URL = (configuredApiBaseUrl || window.location.origin).replace(/\/$/, "");
 
 const form = document.getElementById("transactionForm");
 
