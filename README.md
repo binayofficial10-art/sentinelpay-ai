@@ -36,7 +36,7 @@ FastAPI + StaticFiles
 
 - Python, FastAPI, Uvicorn
 - Pydantic request validation
-- Google Gen AI SDK (Gemini)
+- Gemini REST `generateContent` API
 - HTML, CSS, vanilla JavaScript
 
 ## Local setup
@@ -102,7 +102,7 @@ Example response fields:
 }
 ```
 
-`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `rule_based`.
+`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `fallback`.
 
 ### Other endpoints
 

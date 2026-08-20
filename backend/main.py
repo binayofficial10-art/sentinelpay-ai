@@ -5,15 +5,15 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from google import genai
-from google.genai import types
 from pydantic import BaseModel, Field
 
 
@@ -21,6 +21,10 @@ from pydantic import BaseModel, Field
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def get_cors_allowed_origins() -> list[str]:
@@ -46,28 +50,24 @@ if cors_allowed_origins:
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/frontend", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 api_key = os.getenv("GEMINI_API_KEY")
 gemini_model = os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
-client = genai.Client(api_key=api_key) if api_key else None
 
 
-def get_gemini_error_status(error: Exception) -> int | None:
-    """Extract an HTTP-like status code from SDK exceptions when available."""
-    for attribute in ("status_code", "code"):
-        value = getattr(error, attribute, None)
-        if isinstance(value, int):
-            return value
-    return None
+class GeminiRequestError(Exception):
+    """Gemini REST error with safe diagnostic details for server-side logs."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, response_body: str = ""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
 
 
 def is_transient_gemini_error(error: Exception) -> bool:
-    """Return whether one short retry is appropriate for a Gemini request."""
-    status_code = get_gemini_error_status(error)
-    return (
-        status_code is not None and 500 <= status_code < 600
-        or type(error).__name__ in {"ConnectError", "ReadTimeout", "TimeoutException"}
-    )
+    """Return whether one short retry is appropriate for a Gemini REST request."""
+    if isinstance(error, GeminiRequestError):
+        return error.status_code in GEMINI_RETRYABLE_STATUS_CODES
+    return isinstance(error, URLError)
 
 
 class Transaction(BaseModel):
@@ -77,15 +77,6 @@ class Transaction(BaseModel):
     location: str = Field(min_length=1)
     device: str = Field(min_length=1)
     velocity: int = Field(ge=0)
-
-
-class GeminiAssessmentSchema(BaseModel):
-    """Structured output requested from Gemini for a transaction assessment."""
-
-    risk_score: float
-    risk_level: Literal["LOW", "MEDIUM", "HIGH"]
-    decision: Literal["ALLOW", "REVIEW", "BLOCK"]
-    explanation: str
 
 
 @app.get("/")
@@ -127,7 +118,7 @@ def rule_based_assessment(transaction: Transaction) -> dict[str, Any]:
         "risk_level": risk_level,
         "decision": decision,
         "explanation": "Rule-based fraud assessment because Gemini is unavailable.",
-        "analysis_source": "rule_based",
+        "analysis_source": "fallback",
     }
 
 
@@ -156,6 +147,17 @@ Return JSON only, with exactly these fields and no markdown:
 
 Use LOW/ALLOW for scores 0-39, MEDIUM/REVIEW for 40-69, and HIGH/BLOCK for 70-100.
 """
+
+
+def build_gemini_request_payload(transaction: Transaction) -> dict[str, Any]:
+    """Build the Gemini REST generateContent JSON body without tools or AFC."""
+    return {
+        "contents": [{"parts": [{"text": build_gemini_prompt(transaction)}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.2,
+        },
+    }
 
 
 def extract_gemini_json(response_text: str | None) -> dict[str, Any]:
@@ -212,66 +214,91 @@ def validate_gemini_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def generate_gemini_assessment(transaction: Transaction) -> dict[str, Any]:
-    """Request and validate Gemini output, retrying only transient failures once."""
-    if client is None:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
+def parse_gemini_response(response_body: str) -> dict[str, Any]:
+    """Extract the model text from a Gemini REST response and validate it."""
+    try:
+        response_json = json.loads(response_body)
+        response_text = response_json["candidates"][0]["content"]["parts"][0]["text"]
+        return validate_gemini_assessment(extract_gemini_json(response_text))
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GeminiRequestError(
+            "Gemini REST response did not contain a valid assessment at candidates[0].content.parts[0].text",
+            status_code=200,
+            response_body=response_body,
+        ) from error
 
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=GeminiAssessmentSchema,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+
+def request_gemini(transaction: Transaction) -> str:
+    """Call Gemini generateContent over REST and return its raw JSON response body."""
+    if not api_key:
+        raise GeminiRequestError("GEMINI_API_KEY is not configured")
+
+    request = Request(
+        GEMINI_API_URL_TEMPLATE.format(model=gemini_model),
+        data=json.dumps(build_gemini_request_payload(transaction)).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
     )
+    try:
+        with urlopen(request, timeout=15) as response:
+            return response.read().decode("utf-8")
+    except HTTPError as error:
+        response_body = error.read().decode("utf-8", errors="replace")
+        raise GeminiRequestError(
+            f"Gemini REST request failed with HTTP {error.code}",
+            status_code=error.code,
+            response_body=response_body,
+        ) from error
+    except URLError:
+        raise
 
+
+def generate_gemini_assessment(transaction: Transaction) -> dict[str, Any]:
+    """Request and validate Gemini output, retrying only temporary REST failures once."""
     for attempt in range(2):
         try:
-            response = client.models.generate_content(
-                model=gemini_model,
-                contents=build_gemini_prompt(transaction),
-                config=config,
-            )
-            return validate_gemini_assessment(extract_gemini_json(getattr(response, "text", None)))
+            return parse_gemini_response(request_gemini(transaction))
         except Exception as error:
             if attempt == 0 and is_transient_gemini_error(error):
                 logger.warning(
-                    "Gemini request failed transiently; retrying once. model=%s error_type=%s status=%s detail=%s",
+                    "Gemini REST request failed transiently; retrying once. model=%s status=%s key_configured=%s detail=%s",
                     gemini_model,
-                    type(error).__name__,
-                    get_gemini_error_status(error),
-                    error,
+                    getattr(error, "status_code", None),
+                    bool(api_key),
+                    getattr(error, "response_body", str(error)),
                 )
                 time.sleep(0.25)
                 continue
             raise
 
 
+def log_gemini_failure(error: Exception) -> None:
+    """Log actionable Gemini REST diagnostics without ever logging the API key."""
+    logger.error(
+        "Gemini REST assessment failed; using rule-based fallback. model=%s key_configured=%s status=%s error_type=%s response_body=%s detail=%s",
+        gemini_model,
+        bool(api_key),
+        getattr(error, "status_code", None),
+        type(error).__name__,
+        getattr(error, "response_body", ""),
+        error,
+        exc_info=True,
+    )
+
+
 @app.post("/transaction/check")
 def check_transaction(transaction: Transaction):
-    if client is None:
+    if not api_key:
         logger.info("GEMINI_API_KEY is not configured; using rule-based fallback.")
         analysis = rule_based_assessment(transaction)
     else:
         try:
             analysis = generate_gemini_assessment(transaction)
         except Exception as error:
-            status_code = get_gemini_error_status(error)
-            if status_code == 400:
-                logger.error(
-                    "Gemini API rejected the request (HTTP 400). Check GEMINI_MODEL and generation configuration. model=%s error_type=%s detail=%s",
-                    gemini_model,
-                    type(error).__name__,
-                    error,
-                    exc_info=True,
-                )
-            else:
-                logger.warning(
-                    "Gemini assessment failed; using rule-based fallback. model=%s error_type=%s status=%s detail=%s",
-                    gemini_model,
-                    type(error).__name__,
-                    status_code,
-                    error,
-                    exc_info=True,
-                )
+            log_gemini_failure(error)
             analysis = rule_based_assessment(transaction)
 
     return {
