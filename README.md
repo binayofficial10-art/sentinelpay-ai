@@ -67,7 +67,7 @@ Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/
 | --- | --- | --- |
 | `GEMINI_API_KEY` | No | Gemini API credential. Keep it only in `backend/.env` locally or your deployment secret manager. |
 | `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-3.6-flash`. |
-| `PORT` | Production platform | Port supplied by Render or another hosting provider. |
+| `PORT` | Local server only | Port supplied to Uvicorn when running locally. Vercel manages the production runtime. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated HTTPS frontend origins. Leave empty for the included same-origin frontend. |
 
 Never put `GEMINI_API_KEY` in frontend code, documentation examples, or Git commits.
@@ -114,25 +114,21 @@ Example response fields:
 
 The fallback score is intentionally simple and explainable: higher amounts, rapid transaction velocity, and non-trusted devices add risk points. Scores map to `LOW`/`ALLOW`, `MEDIUM`/`REVIEW`, or `HIGH`/`BLOCK`. These thresholds are demo rules, not validated fraud models.
 
-## Deployment on Render
+## Deployment on Vercel
 
-`render.yaml` is included for a single FastAPI web service. It serves both the dashboard and API from the same public HTTPS origin, so the browser calls `/transaction/check` without a cross-origin request. Connect the GitHub repository, create a Blueprint service, and set `GEMINI_API_KEY` as a secret environment variable in Render if Gemini is desired. The service uses:
+The repository deploys as one Vercel FastAPI application. `api/index.py` exposes the existing `backend.main:app`; FastAPI serves both `/frontend/` and the API from the same Vercel HTTPS origin. The browser therefore posts to `/transaction/check` on its current origin, with no production localhost URL and no CORS configuration required for the included frontend.
 
-```text
-cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
-```
+### Vercel deployment steps
 
-Render health check path: `/health`.
+1. Sign in at [Vercel](https://vercel.com/new), select **Add New** > **Project**, and import the GitHub repository `binayofficial10-art/sentinelpay-ai`.
+2. Leave the project root as the repository root. Vercel detects `api/index.py`, installs the root `requirements.txt`, and uses Python `3.12` from `.python-version`.
+3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` only if Gemini analysis is desired. Mark it for the desired Production/Preview environments; do not put it in source control or a frontend setting.
+4. Optionally add `GEMINI_MODEL` to select a supported Gemini model. If no key is supplied, the app safely uses its rule-based assessment.
+5. Click **Deploy**. On later updates, Vercel deploys new commits from the connected repository.
+6. Open `https://<your-vercel-domain>/health` and confirm it returns `{"status":"ok"}`.
+7. Open `https://<your-vercel-domain>/frontend/` on both a phone and a laptop. Submit the transaction form and confirm it returns an assessment.
 
-### Render deployment steps
-
-1. In Render, select **New** > **Blueprint** and connect `binayofficial10-art/sentinelpay-ai`.
-2. Confirm the generated web service uses the repository `render.yaml`; Render installs `requirements.txt` and binds Uvicorn to its supplied `PORT`.
-3. Leave `GEMINI_API_KEY` unset to use explainable rule-based scoring, or add it in Render's **Environment** settings as a secret. Never place it in GitHub or frontend files.
-4. Deploy and open `https://<your-render-service>.onrender.com/frontend/`. Check `https://<your-render-service>.onrender.com/health` returns `{"status":"ok"}`.
-5. Submit a transaction in the dashboard and confirm the result is returned by `POST /transaction/check` on the same URL origin.
-
-For a deliberately separate frontend host, set the `sentinelpay-api-base-url` meta tag in `frontend/index.html` to the API's HTTPS URL and set `CORS_ALLOWED_ORIGINS` in Render to the exact frontend HTTPS origin. Do not use `*` for CORS.
+For a deliberately separate frontend host, set the `sentinelpay-api-base-url` meta tag in `frontend/index.html` to the API's HTTPS URL and set `CORS_ALLOWED_ORIGINS` in Vercel to that exact frontend HTTPS origin. Do not use `*` for CORS.
 
 ## Usage
 
