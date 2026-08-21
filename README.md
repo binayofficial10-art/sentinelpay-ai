@@ -116,7 +116,7 @@ DATABASE_URL=
 | `GEMINI_API_KEY` | No | Server-side Gemini credential. Without it, rule-based analysis remains available. |
 | `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.7-flash`. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated allowed origins for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
-| `DATABASE_URL` | No locally; needed for durable Vercel history | PostgreSQL connection string. Vercel must not use a file-based SQLite path for persistence. |
+| `DATABASE_URL` | No locally; required for persistent Vercel history | Hosted PostgreSQL connection string. Vercel must not use a file-based SQLite path for persistence. |
 | `PORT` | Local runtime | Port passed to Uvicorn. Vercel manages the production runtime. |
 
 For local use, copy `.env.example` to `backend/.env` and edit the copied file. `backend/main.py` loads that file without overriding environment variables already provided by Vercel. The local `.env` file is ignored by Git.
@@ -263,7 +263,7 @@ The included frontend calls the same HTTPS origin. For a deliberately separate f
 
 ## 13. Testing
 
-Automated API tests are in `tests/test_transaction_check.py`. They cover a successful Gemini assessment, exhausted Gemini `429` and `503` retries falling back successfully, a missing Gemini key, a database write failure, and Vercel's no-SQLite persistence guard. During deployment verification, also use the following checks:
+Automated tests are in `tests/test_transaction_check.py` and `tests/test_database.py`. They cover Gemini and fallback assessments, database write failures, local SQLite saves/retrieval, PostgreSQL `DATABASE_URL` selection, and Vercel's no-SQLite persistence guard. During deployment verification, also use the following checks:
 
 - Submit a low-risk transaction and inspect the displayed assessment.
 - Submit a medium-risk transaction and inspect the displayed assessment.

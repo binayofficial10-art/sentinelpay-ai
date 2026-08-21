@@ -18,6 +18,10 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# Local-only .env loading does not override Vercel environment variables and
+# must run before the database module reads DATABASE_URL.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from backend.database import (
     DatabaseUnavailableError,
     get_recent_transactions,
@@ -25,9 +29,6 @@ from backend.database import (
     save_transaction,
 )
 
-
-# Local-only .env loading does not override Vercel environment variables.
-load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
 

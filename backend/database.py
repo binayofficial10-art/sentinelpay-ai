@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS transactions (
 )
 """
 
+TRANSACTION_INDEX_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_transactions_created_at
+ON transactions (created_at DESC, id DESC)
+"""
+
 
 def using_sqlite() -> bool:
     return not DATABASE_URL or DATABASE_URL.startswith("sqlite:///")
@@ -72,15 +77,16 @@ def sqlite_path() -> str:
 def get_connection() -> Iterator[Any]:
     """Open a short-lived database connection suitable for Vercel functions."""
     if using_sqlite():
-        connection = sqlite3.connect(sqlite_path())
-        connection.row_factory = sqlite3.Row
         try:
-            yield connection
-            connection.commit()
+            connection = sqlite3.connect(sqlite_path())
+            connection.row_factory = sqlite3.Row
+            try:
+                yield connection
+                connection.commit()
+            finally:
+                connection.close()
         except sqlite3.Error as error:
             raise DatabaseUnavailableError("Could not access the local SQLite database") from error
-        finally:
-            connection.close()
         return
 
     try:
@@ -96,8 +102,15 @@ def get_connection() -> Iterator[Any]:
         raise DatabaseUnavailableError("Could not connect to DATABASE_URL") from error
 
 
-def ensure_schema(connection: Any) -> None:
+def initialize_database(connection: Any) -> None:
+    """Apply repeatable schema initialization for local SQLite or PostgreSQL."""
     connection.execute(SQLITE_SCHEMA if using_sqlite() else POSTGRES_SCHEMA)
+    connection.execute(TRANSACTION_INDEX_SCHEMA)
+
+
+def ensure_schema(connection: Any) -> None:
+    """Backward-compatible name for repeatable database initialization."""
+    initialize_database(connection)
 
 
 def serialize_transaction(row: Any) -> dict[str, Any]:
