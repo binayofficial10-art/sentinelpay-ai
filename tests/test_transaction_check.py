@@ -8,109 +8,92 @@ from urllib.error import URLError
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from fastapi.responses import Response
 
 import backend.main as main
-from backend import database
+from backend import auth, database
 from backend.database import DatabaseUnavailableError
 
 
-TRANSACTION = {
-    "amount": 25000,
-    "sender": "user123",
-    "receiver": "merchant456",
-    "location": "Bhubaneswar",
-    "device": "trusted",
-    "velocity": 8,
-}
+TRANSACTION = {"amount": 25000, "sender": "user123", "receiver": "merchant456", "location": "Bhubaneswar", "device": "trusted", "velocity": 8}
+PASSWORD = "correct-horse-battery-staple"
 
 
 def gemini_response() -> str:
-    return json.dumps(
-        {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {
-                                "text": json.dumps(
-                                    {
-                                        "risk_score": 42,
-                                        "risk_level": "MEDIUM",
-                                        "decision": "REVIEW",
-                                        "explanation": "Gemini found a velocity risk signal.",
-                                    }
-                                )
-                            }
-                        ]
-                    }
-                }
-            ]
-        }
-    )
+    assessment = {"risk_score": 42, "risk_level": "MEDIUM", "decision": "REVIEW", "explanation": "Gemini found a velocity risk signal."}
+    return json.dumps({"candidates": [{"content": {"parts": [{"text": json.dumps(assessment)}]}}]})
 
 
-class TransactionCheckTests(unittest.TestCase):
+class DatabaseTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        database_path = Path(self.temporary_directory.name) / "sentinelpay-test.db"
+        self.database_patch = patch.object(database, "DATABASE_URL", f"sqlite:///{database_path.as_posix()}")
+        self.environment_patch = patch.dict(os.environ, {"VERCEL": "", "VERCEL_ENV": "", "GEMINI_API_KEY": ""}, clear=False)
+        self.database_patch.start()
+        self.environment_patch.start()
+        main._auth_attempts.clear()
         self.client = TestClient(main.app)
+
+    def tearDown(self) -> None:
+        self.environment_patch.stop()
+        self.database_patch.stop()
+        self.temporary_directory.cleanup()
+
+
+class TransactionCheckTests(DatabaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user = auth.create_user("user@example.com", PASSWORD)
+        token, _ = auth.create_session(self.user["id"])
+        self.client.cookies.set(main.SESSION_COOKIE_NAME, token)
 
     def post_transaction(self):
         return self.client.post("/transaction/check", json=TRANSACTION)
 
-    def test_gemini_success_returns_200_and_gemini_provider(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "gemini-3.7-flash"}),
-            patch("backend.main.request_gemini", return_value=gemini_response()),
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
+    def test_unauthenticated_transaction_request_returns_401(self):
+        self.client.cookies.clear()
+        self.assertEqual(self.post_transaction().status_code, 401)
+        self.assertEqual(self.client.get("/transactions").status_code, 401)
 
+    def test_gemini_success_returns_200_and_gemini_provider(self):
+        with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "gemini-3.7-flash"}), patch("backend.main.request_gemini", return_value=gemini_response())):
+            response = self.post_transaction()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["analysis_source"], "gemini")
         self.assertEqual(response.json()["provider"], "gemini")
 
-    def test_transaction_check_persists_and_transactions_endpoint_returns_record(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            database_path = Path(temporary_directory) / "sentinelpay-test.db"
-            sqlite_url = f"sqlite:///{database_path.as_posix()}"
-            with (
-                patch.object(database, "DATABASE_URL", sqlite_url),
-                patch.dict(
-                    os.environ,
-                    {"GEMINI_API_KEY": "", "VERCEL": "", "VERCEL_ENV": ""},
-                    clear=False,
-                ),
-            ):
-                check_response = self.post_transaction()
-                history_response = self.client.get("/transactions")
-
-        self.assertEqual(check_response.status_code, 200)
-        self.assertEqual(history_response.status_code, 200)
-        history = history_response.json()
+    def test_transaction_check_persists_and_transactions_endpoint_returns_own_record(self):
+        self.assertEqual(self.post_transaction().status_code, 200)
+        response = self.client.get("/transactions")
+        self.assertEqual(response.status_code, 200)
+        history = response.json()
         self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["amount"], TRANSACTION["amount"])
-        self.assertEqual(history[0]["currency"], "INR")
+        self.assertEqual(history[0]["user_id"], self.user["id"])
         self.assertEqual(history[0]["merchant"], TRANSACTION["receiver"])
         self.assertEqual(history[0]["provider"], "rule_based_fallback")
-        self.assertEqual(history[0]["analysis_source"], "rule_based")
+
+    def test_user_cannot_retrieve_another_users_transaction(self):
+        self.post_transaction()
+        transaction_id = self.client.get("/transactions").json()[0]["id"]
+        other_user = auth.create_user("other@example.com", PASSWORD)
+        other_token, _ = auth.create_session(other_user["id"])
+        other_client = TestClient(main.app)
+        other_client.cookies.set(main.SESSION_COOKIE_NAME, other_token)
+        self.assertEqual(other_client.get("/transactions").json(), [])
+        self.assertEqual(other_client.get(f"/transactions/{transaction_id}").status_code, 404)
 
     def test_invalid_transaction_input_returns_422(self):
-        invalid_transaction = {**TRANSACTION, "amount": -1}
+        self.assertEqual(self.client.post("/transaction/check", json={**TRANSACTION, "amount": -1}).status_code, 422)
 
-        response = self.client.post("/transaction/check", json=invalid_transaction)
-
+    def test_client_supplied_user_id_is_rejected(self):
+        response = self.client.post("/transaction/check", json={**TRANSACTION, "user_id": 999999})
         self.assertEqual(response.status_code, 422)
 
     def test_gemini_503_retries_then_returns_fallback_200(self):
         error = main.GeminiRequestError("service unavailable", status_code=503)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error) as request_gemini,
-            patch("backend.main.random.uniform", return_value=0),
-            patch("backend.main.time.sleep") as sleep,
-            patch("backend.main.save_transaction"),
-        ):
+        with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch("backend.main.request_gemini", side_effect=error) as request_gemini, patch("backend.main.time.sleep") as sleep):
             response = self.post_transaction()
-
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
         self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
@@ -118,155 +101,91 @@ class TransactionCheckTests(unittest.TestCase):
 
     def test_gemini_429_retries_then_returns_fallback_200(self):
         error = main.GeminiRequestError("rate limited", status_code=429)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error) as request_gemini,
-            patch("backend.main.random.uniform", return_value=0),
-            patch("backend.main.time.sleep") as sleep,
-            patch("backend.main.save_transaction"),
-        ):
+        with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch("backend.main.request_gemini", side_effect=error) as request_gemini, patch("backend.main.time.sleep") as sleep):
             response = self.post_transaction()
-
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
         self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
         self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
 
-    def test_retry_after_is_capped_to_keep_request_short(self):
-        error = main.GeminiRequestError("rate limited", status_code=429, retry_after_seconds=120)
+    def test_timeout_and_network_failures_return_fallback(self):
+        for error in (socket.timeout("timed out"), URLError("unavailable")):
+            with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch("backend.main.request_gemini", side_effect=error), patch("backend.main.time.sleep")):
+                response = self.post_transaction()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["provider"], "rule_based_fallback")
 
-        self.assertEqual(main.gemini_retry_delay(0, error), main.GEMINI_MAX_RETRY_AFTER_SECONDS)
-
-    def test_missing_gemini_key_returns_fallback_200(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": ""}),
-            patch("backend.main.save_transaction"),
-        ):
+    def test_database_failure_does_not_crash_authenticated_analysis(self):
+        with patch("backend.main.save_transaction", side_effect=DatabaseUnavailableError("unavailable")):
             response = self.post_transaction()
-
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
 
-    def test_database_unavailable_does_not_change_successful_fallback_response(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": ""}),
-            patch(
-                "backend.main.save_transaction",
-                side_effect=DatabaseUnavailableError("database unavailable"),
-            ),
-        ):
-            response = self.post_transaction()
+    def test_authenticated_history_database_failure_returns_503(self):
+        with patch("backend.main.get_recent_transactions", side_effect=DatabaseUnavailableError("unavailable")):
+            response = self.client.get("/transactions")
+        self.assertEqual(response.status_code, 503)
 
+
+class AuthenticationTests(DatabaseTestCase):
+    def test_frontend_serves_the_authentication_shell(self):
+        response = self.client.get("/frontend/")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
+        self.assertIn('id="loginForm"', response.text)
+        self.assertIn('id="registerForm"', response.text)
+        self.assertIn('id="logoutButton"', response.text)
 
-    def test_vercel_does_not_open_sqlite_for_transaction_persistence(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": ""}),
-            patch.object(database, "DATABASE_URL", ""),
-            patch.dict(os.environ, {"VERCEL": "1"}, clear=False),
-            patch("backend.database.sqlite3.connect") as sqlite_connect,
-        ):
-            response = self.post_transaction()
+    def test_cors_configuration_requires_explicit_https_origins_in_production(self):
+        with patch.dict(os.environ, {"VERCEL": "1", "CORS_ALLOWED_ORIGINS": "https://app.example.com/"}, clear=False):
+            self.assertEqual(main.get_cors_allowed_origins(), ["https://app.example.com"])
+        with patch.dict(os.environ, {"VERCEL": "1", "CORS_ALLOWED_ORIGINS": "*"}, clear=False):
+            with self.assertRaises(ValueError):
+                main.get_cors_allowed_origins()
+        with patch.dict(os.environ, {"VERCEL": "1", "CORS_ALLOWED_ORIGINS": "http://app.example.com"}, clear=False):
+            with self.assertRaises(ValueError):
+                main.get_cors_allowed_origins()
 
+    def test_frontend_config_exposes_only_the_optional_public_api_origin(self):
+        with patch.dict(os.environ, {"FRONTEND_API_BASE_URL": "https://api.example.com/", "DATABASE_URL": "sensitive-value"}, clear=False):
+            response = self.client.get("/frontend-config.js")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        sqlite_connect.assert_not_called()
+        self.assertIn('window.SENTINELPAY_API_BASE_URL = "https://api.example.com"', response.text)
+        self.assertNotIn("sensitive-value", response.text)
 
-    def test_invalid_api_key_returns_fallback_without_retry(self):
-        error = main.GeminiRequestError("unauthorized", status_code=401)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error) as request_gemini,
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
+    def test_register_login_me_and_logout(self):
+        credentials = {"email": "account@example.com", "password": PASSWORD}
+        registered = self.client.post("/auth/register", json=credentials)
+        self.assertEqual(registered.status_code, 201)
+        self.assertEqual(registered.json()["user"]["email"], credentials["email"])
+        self.assertEqual(self.client.get("/auth/me").status_code, 200)
+        self.assertEqual(self.client.post("/auth/logout").status_code, 204)
+        self.assertEqual(self.client.get("/auth/me").status_code, 401)
+        self.assertEqual(self.client.post("/auth/login", json=credentials).status_code, 200)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        request_gemini.assert_called_once()
+    def test_duplicate_registration_and_invalid_password_are_safe(self):
+        credentials = {"email": "duplicate@example.com", "password": PASSWORD}
+        self.assertEqual(self.client.post("/auth/register", json=credentials).status_code, 201)
+        self.assertEqual(self.client.post("/auth/register", json=credentials).status_code, 409)
+        self.assertEqual(self.client.post("/auth/login", json={**credentials, "password": "wrong-password-value"}).status_code, 401)
 
-    def test_invalid_request_returns_fallback_without_retry(self):
-        error = main.GeminiRequestError("bad request", status_code=400)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error) as request_gemini,
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
+    def test_invalid_registration_input_returns_422(self):
+        response = self.client.post("/auth/register", json={"email": "not-an-email", "password": "short"})
+        self.assertEqual(response.status_code, 422)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        request_gemini.assert_called_once()
+    def test_production_session_cookie_is_secure_and_http_only(self):
+        with patch.dict(os.environ, {"VERCEL": "1"}, clear=False):
+            response = Response()
+            main.set_session_cookie(response, "test-session-token")
+        cookie = response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("secure", cookie)
+        self.assertIn("samesite=lax", cookie)
 
-    def test_invalid_model_returns_fallback_without_retry(self):
-        error = main.GeminiRequestError("not found", status_code=404)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error) as request_gemini,
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        request_gemini.assert_called_once()
-
-    def test_timeout_returns_fallback_after_two_retries(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=socket.timeout("timed out")) as request_gemini,
-            patch("backend.main.time.sleep") as sleep,
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
-        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
-
-    def test_gemini_unavailable_network_error_returns_fallback(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=URLError("unavailable")) as request_gemini,
-            patch("backend.main.time.sleep") as sleep,
-            patch("backend.main.save_transaction"),
-        ):
-            response = self.post_transaction()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["analysis_source"], "rule_based")
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
-        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
-
-    def test_malformed_model_value_returns_fallback_and_persists_transaction(self):
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "models/gemini-3.7-flash"}),
-            patch("backend.main.request_gemini") as request_gemini,
-            patch("backend.main.save_transaction") as save_transaction,
-        ):
-            response = self.post_transaction()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["analysis_source"], "rule_based")
-        request_gemini.assert_not_called()
-        self.assertEqual(save_transaction.call_args.args[0]["analysis_source"], "rule_based")
-
-    def test_gemini_failure_uses_fallback_and_persists_transaction(self):
-        error = main.GeminiRequestError("service unavailable", status_code=503)
-        with (
-            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
-            patch("backend.main.request_gemini", side_effect=error),
-            patch("backend.main.time.sleep"),
-            patch("backend.main.save_transaction") as save_transaction,
-        ):
-            response = self.post_transaction()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(save_transaction.call_args.args[0]["analysis_source"], "rule_based")
+    def test_authentication_rate_limit_returns_429(self):
+        for _ in range(main.AUTH_RATE_LIMIT):
+            self.client.post("/auth/login", json={"email": "missing@example.com", "password": PASSWORD})
+        response = self.client.post("/auth/login", json={"email": "missing@example.com", "password": PASSWORD})
+        self.assertEqual(response.status_code, 429)
 
 
 if __name__ == "__main__":

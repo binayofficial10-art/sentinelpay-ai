@@ -7,13 +7,11 @@
     <title>SentinelPay AI</title>
 
     <link rel="stylesheet" href="style.css">
-    <!-- Empty uses this site's HTTPS origin. Set only for an intentionally separate API host. -->
-    <meta name="sentinelpay-api-base-url" content="">
 </head>
 
 <body>
 
-    <header class="navbar">
+    <header class="navbar hidden" id="appHeader">
         <div class="logo">
             <span class="logo-icon">🛡️</span>
             <div>
@@ -22,14 +20,57 @@
             </div>
         </div>
 
-        <div class="status">
-            <span class="status-dot"></span>
-            AI ENGINE ONLINE
+        <div class="account-controls">
+            <div class="status">
+                <span class="status-dot"></span>
+                AI ENGINE ONLINE
+            </div>
+            <span id="authenticatedUser" class="authenticated-user" aria-live="polite"></span>
+            <button id="logoutButton" class="logout-button" type="button">LOG OUT</button>
         </div>
     </header>
 
+    <main id="authPage" class="auth-page">
+        <section class="auth-card" aria-labelledby="authTitle">
+            <div class="auth-brand">
+                <span class="logo-icon">🛡️</span>
+                <p class="tag">SENTINELPAY AI</p>
+                <h1 id="authTitle">Sign in to your workspace</h1>
+                <p>Analyze and monitor transactions securely.</p>
+            </div>
 
-    <main class="container">
+            <p id="authMessage" class="auth-message hidden" role="alert"></p>
+
+            <form id="loginForm" class="auth-form">
+                <div class="input-group">
+                    <label for="loginEmail">Email</label>
+                    <input id="loginEmail" type="email" autocomplete="email" required maxlength="254">
+                </div>
+                <div class="input-group">
+                    <label for="loginPassword">Password</label>
+                    <input id="loginPassword" type="password" autocomplete="current-password" required minlength="12" maxlength="256">
+                </div>
+                <button id="loginButton" type="submit">SIGN IN</button>
+                <p class="auth-switch">New to SentinelPay? <button id="showRegister" type="button" class="text-button">Create an account</button></p>
+            </form>
+
+            <form id="registerForm" class="auth-form hidden">
+                <div class="input-group">
+                    <label for="registerEmail">Email</label>
+                    <input id="registerEmail" type="email" autocomplete="email" required maxlength="254">
+                </div>
+                <div class="input-group">
+                    <label for="registerPassword">Password</label>
+                    <input id="registerPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="256" aria-describedby="passwordHelp">
+                    <small id="passwordHelp">Use at least 12 characters.</small>
+                </div>
+                <button id="registerButton" type="submit">CREATE ACCOUNT</button>
+                <p class="auth-switch">Already have an account? <button id="showLogin" type="button" class="text-button">Sign in</button></p>
+            </form>
+        </section>
+    </main>
+
+    <main id="dashboardMain" class="container hidden">
 
         <section class="hero">
             <div>
@@ -298,6 +339,7 @@
     </footer>
 
 
+    <script src="/frontend-config.js"></script>
     <script src="script.js"></script>
 
 </body>

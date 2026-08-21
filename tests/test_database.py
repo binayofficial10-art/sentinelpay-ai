@@ -9,6 +9,7 @@ from backend import database
 
 
 RECORD = {
+    "user_id": 1,
     "amount": 25000.0,
     "sender": "user123",
     "receiver": "merchant456",
@@ -32,9 +33,14 @@ class DatabaseTests(unittest.TestCase):
                 patch.object(database, "DATABASE_URL", sqlite_url),
                 patch.dict(os.environ, {"VERCEL": "", "VERCEL_ENV": ""}, clear=False),
             ):
+                with database.get_connection() as connection:
+                    database.ensure_schema(connection)
+                    connection.execute(
+                        "INSERT INTO users (id, email, password_hash) VALUES (1, 'user@example.com', 'test-hash')"
+                    )
                 saved = database.save_transaction(RECORD)
-                recent = database.get_recent_transactions()
-                retrieved = database.get_transaction(saved["id"])
+                recent = database.get_recent_transactions(RECORD["user_id"])
+                retrieved = database.get_transaction(saved["id"], RECORD["user_id"])
 
         self.assertIsNotNone(saved)
         self.assertEqual(saved["amount"], RECORD["amount"])
@@ -83,12 +89,18 @@ class DatabaseTests(unittest.TestCase):
                 patch.object(database, "DATABASE_URL", sqlite_url),
                 patch.dict(os.environ, {"VERCEL": "", "VERCEL_ENV": ""}, clear=False),
             ):
-                migrated = database.get_recent_transactions()
+                with database.get_connection() as migrated_connection:
+                    database.ensure_schema(migrated_connection)
+                    migrated = dict(
+                        migrated_connection.execute(
+                            "SELECT merchant, currency, provider, explanation FROM transactions"
+                        ).fetchone()
+                    )
 
-        self.assertEqual(migrated[0]["merchant"], "legacy-merchant")
-        self.assertEqual(migrated[0]["currency"], "INR")
-        self.assertEqual(migrated[0]["provider"], "gemini")
-        self.assertEqual(migrated[0]["explanation"], "legacy assessment")
+        self.assertEqual(migrated["merchant"], "legacy-merchant")
+        self.assertEqual(migrated["currency"], "INR")
+        self.assertEqual(migrated["provider"], "gemini")
+        self.assertEqual(migrated["explanation"], "legacy assessment")
 
     def test_vercel_uses_postgresql_database_url_without_opening_sqlite(self):
         postgres_url = "postgresql://database.example.invalid/sentinelpay"

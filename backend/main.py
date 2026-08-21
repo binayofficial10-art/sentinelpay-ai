@@ -15,11 +15,14 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Local-only .env loading does not override Vercel environment variables and
 # must run before the database module reads DATABASE_URL.
@@ -30,6 +33,15 @@ from backend.database import (
     get_recent_transactions,
     get_transaction,
     save_transaction,
+)
+from backend.auth import (
+    AuthenticationError,
+    DuplicateUserError,
+    authenticate_user,
+    create_session,
+    create_user,
+    delete_session,
+    get_user_for_session,
 )
 
 
@@ -43,15 +55,26 @@ GEMINI_RETRY_BASE_DELAY_SECONDS = 0.25
 GEMINI_RETRY_JITTER_SECONDS = 0.1
 GEMINI_REQUEST_TIMEOUT_SECONDS = 3
 GEMINI_MAX_RETRY_AFTER_SECONDS = 1
+SESSION_COOKIE_NAME = "sentinelpay_session"
+AUTH_RATE_LIMIT = 10
+AUTH_RATE_WINDOW_SECONDS = 60
+_auth_attempts: dict[str, list[float]] = {}
 
 
 def get_cors_allowed_origins() -> list[str]:
     """Read an explicit comma-separated CORS allowlist from the environment."""
-    return [
+    origins = [
         origin.strip().rstrip("/")
         for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
         if origin.strip()
     ]
+    if "*" in origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain explicit origins, never '*'.")
+    if (os.getenv("VERCEL") or os.getenv("VERCEL_ENV")) and any(
+        not origin.startswith("https://") for origin in origins
+    ):
+        raise ValueError("Production CORS_ALLOWED_ORIGINS entries must use HTTPS.")
+    return origins
 
 
 app = FastAPI(title="SentinelPay AI")
@@ -60,7 +83,7 @@ if cors_allowed_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_allowed_origins,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Content-Type"],
     )
@@ -136,6 +159,8 @@ def parse_retry_after(value: str | None) -> float | None:
 
 
 class Transaction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     amount: float = Field(ge=0)
     sender: str = Field(min_length=1)
     receiver: str = Field(min_length=1)
@@ -144,9 +169,67 @@ class Transaction(BaseModel):
     velocity: int = Field(ge=0)
 
 
+class Credentials(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    password: str = Field(min_length=12, max_length=256)
+
+
+def public_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {"id": user["id"], "email": user["email"], "created_at": user["created_at"]}
+
+
+def check_auth_rate_limit(request: FastAPIRequest) -> None:
+    client_host = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    attempts = [timestamp for timestamp in _auth_attempts.get(client_host, []) if now - timestamp < AUTH_RATE_WINDOW_SECONDS]
+    if len(attempts) >= AUTH_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many authentication attempts. Please try again later.")
+    attempts.append(now)
+    _auth_attempts[client_host] = attempts
+
+
+def require_authenticated_user(request: FastAPIRequest) -> dict[str, Any]:
+    try:
+        return get_user_for_session(request.cookies.get(SESSION_COOKIE_NAME))
+    except AuthenticationError as error:
+        raise HTTPException(status_code=401, detail="Authentication required.") from error
+    except DatabaseUnavailableError as error:
+        logger.exception("Authentication database is unavailable.")
+        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable.") from error
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV")),
+        samesite="lax",
+        max_age=7 * 24 * 60 * 60,
+        path="/",
+    )
+
+
 @app.get("/")
 def home():
     return RedirectResponse(url="/frontend/")
+
+
+@app.get("/frontend-config.js", include_in_schema=False)
+def frontend_config():
+    """Expose only the optional public API origin to the static frontend.
+
+    The included Vercel deployment is same-origin, so this remains empty by
+    default.  Credentials and other server configuration are never sent here.
+    """
+    api_base_url = os.getenv("FRONTEND_API_BASE_URL", "").strip().rstrip("/")
+    return Response(
+        content=f"window.SENTINELPAY_API_BASE_URL = {json.dumps(api_base_url)};\n",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/health")
@@ -154,19 +237,64 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/transactions")
-def list_transactions():
+@app.post("/auth/register", status_code=201)
+def register(credentials: Credentials, request: FastAPIRequest, response: Response):
+    check_auth_rate_limit(request)
     try:
-        return get_recent_transactions()
+        user = create_user(credentials.email, credentials.password)
+        token, _ = create_session(user["id"])
+    except DuplicateUserError as error:
+        raise HTTPException(status_code=409, detail="Unable to register with those credentials.") from error
+    except DatabaseUnavailableError as error:
+        logger.exception("Authentication database is unavailable.")
+        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable.") from error
+    set_session_cookie(response, token)
+    return {"user": public_user(user)}
+
+
+@app.post("/auth/login")
+def login(credentials: Credentials, request: FastAPIRequest, response: Response):
+    check_auth_rate_limit(request)
+    try:
+        user = authenticate_user(credentials.email, credentials.password)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        token, _ = create_session(user["id"])
+    except DatabaseUnavailableError as error:
+        logger.exception("Authentication database is unavailable.")
+        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable.") from error
+    set_session_cookie(response, token)
+    return {"user": public_user(user)}
+
+
+@app.post("/auth/logout", status_code=204)
+def logout(request: FastAPIRequest, response: Response):
+    try:
+        delete_session(request.cookies.get(SESSION_COOKIE_NAME))
+    except DatabaseUnavailableError as error:
+        logger.exception("Authentication database is unavailable.")
+        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable.") from error
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+@app.get("/auth/me")
+def current_user(user: dict[str, Any] = Depends(require_authenticated_user)):
+    return {"user": public_user(user)}
+
+
+@app.get("/transactions")
+def list_transactions(user: dict[str, Any] = Depends(require_authenticated_user)):
+    try:
+        return get_recent_transactions(user["id"])
     except DatabaseUnavailableError as error:
         logger.exception("Transaction history database is unavailable.")
         raise HTTPException(status_code=503, detail="Transaction history is temporarily unavailable.") from error
 
 
 @app.get("/transactions/{transaction_id}")
-def read_transaction(transaction_id: int):
+def read_transaction(transaction_id: int, user: dict[str, Any] = Depends(require_authenticated_user)):
     try:
-        transaction = get_transaction(transaction_id)
+        transaction = get_transaction(transaction_id, user["id"])
     except DatabaseUnavailableError as error:
         logger.exception("Transaction history database is unavailable.")
         raise HTTPException(status_code=503, detail="Transaction history is temporarily unavailable.") from error
@@ -385,7 +513,7 @@ def log_gemini_failure(error: Exception, *, gemini_model: str | None, key_config
 
 
 @app.post("/transaction/check")
-def check_transaction(transaction: Transaction):
+def check_transaction(transaction: Transaction, user: dict[str, Any] = Depends(require_authenticated_user)):
     try:
         api_key, gemini_model = get_gemini_configuration()
     except GeminiRequestError as error:
@@ -417,7 +545,8 @@ def check_transaction(transaction: Transaction):
         save_transaction(
             {
                 **transaction.model_dump(),
-                "session_id": "anonymous",
+                "user_id": user["id"],
+                "session_id": str(user["id"]),
                 "currency": "INR",
                 "merchant": transaction.receiver,
                 "transaction_timestamp": datetime.now(timezone.utc),

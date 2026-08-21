@@ -108,6 +108,7 @@ Use only placeholder values in local configuration. Do not commit real credentia
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.7-flash
 CORS_ALLOWED_ORIGINS=
+FRONTEND_API_BASE_URL=
 DATABASE_URL=
 ```
 
@@ -116,12 +117,13 @@ DATABASE_URL=
 | `GEMINI_API_KEY` | No | Server-side Gemini credential. Without it, rule-based analysis remains available. |
 | `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.7-flash`. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated allowed origins for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
+| `FRONTEND_API_BASE_URL` | No | Public HTTPS API origin only for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
 | `DATABASE_URL` | No locally; required for persistent Vercel history | Hosted PostgreSQL connection string. Vercel must not use a file-based SQLite path for persistence. |
 | `PORT` | Local runtime | Port passed to Uvicorn. Vercel manages the production runtime. |
 
 For local use, copy `.env.example` to `backend/.env` and edit the copied file. `backend/main.py` loads that file without overriding environment variables already provided by Vercel. The local `.env` file is ignored by Git.
 
-In Vercel, open the project **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for the intended Production and/or Preview environments, and optionally add `GEMINI_MODEL`. Add a PostgreSQL `DATABASE_URL` for durable transaction history. Do not add the Gemini key to frontend settings or source files.
+In Vercel, open the project **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for the intended Production and/or Preview environments, and optionally add `GEMINI_MODEL`. Add a PostgreSQL `DATABASE_URL` for durable transaction history. The included frontend is served by FastAPI on the same origin, so leave `FRONTEND_API_BASE_URL` and `CORS_ALLOWED_ORIGINS` empty. For an intentionally separate frontend, set `FRONTEND_API_BASE_URL` to the API HTTPS origin and `CORS_ALLOWED_ORIGINS` to the exact frontend HTTPS origin—never `*`. Do not add the Gemini key to frontend settings or source files.
 
 ## 10. Local Development
 
