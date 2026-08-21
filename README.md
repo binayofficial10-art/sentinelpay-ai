@@ -95,7 +95,7 @@ The exact decision is produced by the implemented Gemini or rule-based risk-anal
 Gemini is called only by the backend through the Gemini REST `generateContent` API. The browser never receives the API key and `frontend/script.js` sends only transaction data to the application API.
 
 - `GEMINI_API_KEY` is read from the server environment.
-- `GEMINI_MODEL` selects the Gemini model; the current application default is `gemini-3.6-flash`.
+- `GEMINI_MODEL` selects the Gemini model; the current application default is `gemini-3.7-flash`.
 - The request asks for JSON output and contains no automatic function calling, tools, or function declarations.
 - The backend validates required fields, allowed values, score range, and explanation before using a Gemini response.
 - Gemini errors are logged server-side without logging the API key; the client receives a safe rule-based fallback assessment.
@@ -106,7 +106,7 @@ Use only placeholder values in local configuration. Do not commit real credentia
 
 ```dotenv
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-3.6-flash
+GEMINI_MODEL=gemini-3.7-flash
 CORS_ALLOWED_ORIGINS=
 DATABASE_URL=
 ```
@@ -114,7 +114,7 @@ DATABASE_URL=
 | Variable | Required | Description |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | No | Server-side Gemini credential. Without it, rule-based analysis remains available. |
-| `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.6-flash`. |
+| `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.7-flash`. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated allowed origins for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
 | `DATABASE_URL` | No locally; needed for durable Vercel history | PostgreSQL connection string. Vercel must not use a file-based SQLite path for persistence. |
 | `PORT` | Local runtime | Port passed to Uvicorn. Vercel manages the production runtime. |
@@ -204,11 +204,12 @@ Example response:
   "risk_level": "LOW",
   "decision": "ALLOW",
   "explanation": "Rule-based fraud assessment because Gemini is unavailable.",
-  "analysis_source": "rule_based"
+  "analysis_source": "rule_based",
+  "provider": "rule_based_fallback"
 }
 ```
 
-`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `rule_based`.
+`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `rule_based`. The `provider` field is `gemini` or `rule_based_fallback` and identifies which assessment generated the response.
 
 ### `GET /transactions`
 
@@ -252,7 +253,7 @@ The project is configured as one Vercel deployment. `vercel.json` includes the `
 
 1. In [Vercel](https://vercel.com/new), choose **Add New** > **Project** and import `binayofficial10-art/sentinelpay-ai`.
 2. Keep the repository root as the project root. Vercel installs `requirements.txt` and runs the Python entry point in `app.py`.
-3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for Production and/or Preview. Optionally set `GEMINI_MODEL=gemini-3.6-flash`.
+3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for Production and/or Preview. Optionally set `GEMINI_MODEL=gemini-3.7-flash`.
 4. For persistent production history, configure a PostgreSQL `DATABASE_URL`. Without it, analysis endpoints continue to work but history is not persisted in Vercel's serverless filesystem.
 5. Deploy the project.
 6. Test `https://<your-domain>/health`, `https://<your-domain>/`, and `https://<your-domain>/frontend/`.
@@ -262,7 +263,7 @@ The included frontend calls the same HTTPS origin. For a deliberately separate f
 
 ## 13. Testing
 
-No automated test suite is committed in this repository. During development and deployment verification, use the following checks rather than treating this README as evidence of a specific test result:
+Automated API tests are in `tests/test_transaction_check.py`. They cover a successful Gemini assessment, exhausted Gemini `429` and `503` retries falling back successfully, a missing Gemini key, a database write failure, and Vercel's no-SQLite persistence guard. During deployment verification, also use the following checks:
 
 - Submit a low-risk transaction and inspect the displayed assessment.
 - Submit a medium-risk transaction and inspect the displayed assessment.
@@ -275,7 +276,7 @@ No automated test suite is committed in this repository. During development and 
 
 - If `GEMINI_API_KEY` is absent, the backend uses the rule-based assessment.
 - Gemini HTTP, network, malformed-response, invalid-model, authentication, and quota/rate-limit failures are logged server-side with useful diagnostic details but without the API key.
-- Only selected temporary server failures are retried once. A Gemini `429` rate-limit response immediately uses the fallback to avoid extra quota use.
+- Gemini `429`, `500`, `502`, `503`, and `504` failures use a small bounded retry count with exponential backoff and jitter. If Gemini still fails, the backend returns the rule-based fallback.
 - The `/transaction/check` endpoint keeps a completed assessment even if saving transaction history fails.
 - If a configured history database cannot be reached, history endpoints return a `503` response. On Vercel without an external database, history is safely disabled and returns no records rather than using local SQLite storage.
 - Standard FastAPI/Pydantic validation rejects invalid transaction request fields.

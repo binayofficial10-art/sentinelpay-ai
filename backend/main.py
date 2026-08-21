@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -30,9 +31,12 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GEMINI_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+GEMINI_MAX_RETRIES = 2
+GEMINI_RETRY_BASE_DELAY_SECONDS = 0.25
+GEMINI_RETRY_JITTER_SECONDS = 0.1
 
 
 def get_cors_allowed_origins() -> list[str]:
@@ -72,10 +76,17 @@ class GeminiRequestError(Exception):
 
 
 def is_transient_gemini_error(error: Exception) -> bool:
-    """Return whether one short retry is appropriate for a Gemini REST request."""
+    """Return whether a bounded retry is appropriate for a Gemini REST request."""
     if isinstance(error, GeminiRequestError):
         return error.status_code in GEMINI_RETRYABLE_STATUS_CODES
     return isinstance(error, URLError)
+
+
+def gemini_retry_delay(attempt: int) -> float:
+    """Use capped retries with exponential backoff and a small random jitter."""
+    return (GEMINI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)) + random.uniform(
+        0, GEMINI_RETRY_JITTER_SECONDS
+    )
 
 
 class Transaction(BaseModel):
@@ -149,6 +160,7 @@ def rule_based_assessment(transaction: Transaction) -> dict[str, Any]:
         "decision": decision,
         "explanation": "Rule-based fraud assessment because Gemini is unavailable.",
         "analysis_source": "rule_based",
+        "provider": "rule_based_fallback",
     }
 
 
@@ -241,6 +253,7 @@ def validate_gemini_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
         "decision": decision,
         "explanation": explanation,
         "analysis_source": "gemini",
+        "provider": "gemini",
     }
 
 
@@ -287,20 +300,22 @@ def request_gemini(transaction: Transaction) -> str:
 
 
 def generate_gemini_assessment(transaction: Transaction) -> dict[str, Any]:
-    """Request and validate Gemini output, retrying only temporary REST failures once."""
-    for attempt in range(2):
+    """Request and validate Gemini output with bounded retries for transient failures."""
+    for attempt in range(GEMINI_MAX_RETRIES + 1):
         try:
             return parse_gemini_response(request_gemini(transaction))
         except Exception as error:
-            if attempt == 0 and is_transient_gemini_error(error):
+            if attempt < GEMINI_MAX_RETRIES and is_transient_gemini_error(error):
+                delay = gemini_retry_delay(attempt)
                 logger.warning(
-                    "Gemini REST request failed transiently; retrying once. model=%s status=%s key_configured=%s detail=%s",
+                    "Gemini REST request failed transiently; retrying after %.2fs. model=%s status=%s key_configured=%s detail=%s",
+                    delay,
                     gemini_model,
                     getattr(error, "status_code", None),
                     bool(api_key),
                     getattr(error, "response_body", str(error)),
                 )
-                time.sleep(0.25)
+                time.sleep(delay)
                 continue
             raise
 
@@ -338,6 +353,7 @@ def check_transaction(transaction: Transaction):
         "decision": analysis["decision"],
         "explanation": analysis["explanation"],
         "analysis_source": analysis["analysis_source"],
+        "provider": analysis["provider"],
     }
     try:
         save_transaction(

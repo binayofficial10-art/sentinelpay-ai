@@ -56,8 +56,8 @@ def using_sqlite() -> bool:
 
 
 def persistence_enabled() -> bool:
-    """Use SQLite locally, but never attempt file storage in Vercel functions."""
-    if os.getenv("VERCEL"):
+    """Use SQLite locally, but never write a SQLite file in Vercel functions."""
+    if os.getenv("VERCEL") or os.getenv("VERCEL_ENV"):
         return bool(DATABASE_URL) and not DATABASE_URL.startswith("sqlite:///")
     return True
 
