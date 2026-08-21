@@ -41,6 +41,12 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(recent[0]["id"], saved["id"])
         self.assertEqual(retrieved["sender"], RECORD["sender"])
         self.assertEqual(retrieved["analysis_source"], RECORD["analysis_source"])
+        self.assertEqual(retrieved["currency"], "INR")
+        self.assertEqual(retrieved["merchant"], RECORD["receiver"])
+        self.assertEqual(retrieved["provider"], "rule_based_fallback")
+        self.assertEqual(retrieved["explanation"], RECORD["ai_explanation"])
+        self.assertEqual(retrieved["session_id"], "anonymous")
+        self.assertTrue(retrieved["transaction_timestamp"])
 
     def test_database_unavailable_raises_a_safe_storage_error(self):
         with (
@@ -50,6 +56,39 @@ class DatabaseTests(unittest.TestCase):
         ):
             with self.assertRaises(database.DatabaseUnavailableError):
                 database.save_transaction(RECORD)
+
+    def test_sqlite_migrates_existing_transaction_history_additively(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "legacy-sentinelpay.db"
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                "CREATE TABLE transactions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL NOT NULL, sender TEXT NOT NULL, "
+                "receiver TEXT NOT NULL, location TEXT NOT NULL, device TEXT NOT NULL, velocity INTEGER NOT NULL, "
+                "risk_score INTEGER NOT NULL, risk_level TEXT NOT NULL, decision TEXT NOT NULL, "
+                "ai_explanation TEXT NOT NULL, analysis_source TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            connection.execute(
+                "INSERT INTO transactions (amount, sender, receiver, location, device, velocity, risk_score, "
+                "risk_level, decision, ai_explanation, analysis_source) "
+                "VALUES (1, 'legacy-user', 'legacy-merchant', 'Delhi', 'trusted', 1, 0, 'LOW', 'ALLOW', "
+                "'legacy assessment', 'gemini')"
+            )
+            connection.commit()
+            connection.close()
+
+            sqlite_url = f"sqlite:///{database_path.as_posix()}"
+            with (
+                patch.object(database, "DATABASE_URL", sqlite_url),
+                patch.dict(os.environ, {"VERCEL": "", "VERCEL_ENV": ""}, clear=False),
+            ):
+                migrated = database.get_recent_transactions()
+
+        self.assertEqual(migrated[0]["merchant"], "legacy-merchant")
+        self.assertEqual(migrated[0]["currency"], "INR")
+        self.assertEqual(migrated[0]["provider"], "gemini")
+        self.assertEqual(migrated[0]["explanation"], "legacy assessment")
 
     def test_vercel_uses_postgresql_database_url_without_opening_sqlite(self):
         postgres_url = "postgresql://database.example.invalid/sentinelpay"

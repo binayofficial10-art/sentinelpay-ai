@@ -417,9 +417,15 @@ def check_transaction(transaction: Transaction):
         save_transaction(
             {
                 **transaction.model_dump(),
+                "session_id": "anonymous",
+                "currency": "INR",
+                "merchant": transaction.receiver,
+                "transaction_timestamp": datetime.now(timezone.utc),
                 "risk_score": result["risk_score"],
                 "risk_level": result["risk_level"],
                 "decision": result["decision"],
+                "provider": result["provider"],
+                "explanation": result["explanation"],
                 "ai_explanation": result["explanation"],
                 "analysis_source": result["analysis_source"],
             }

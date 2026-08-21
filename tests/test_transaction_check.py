@@ -1,7 +1,9 @@
 import json
 import os
 import socket
+import tempfile
 import unittest
+from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
@@ -65,6 +67,38 @@ class TransactionCheckTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["analysis_source"], "gemini")
         self.assertEqual(response.json()["provider"], "gemini")
+
+    def test_transaction_check_persists_and_transactions_endpoint_returns_record(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "sentinelpay-test.db"
+            sqlite_url = f"sqlite:///{database_path.as_posix()}"
+            with (
+                patch.object(database, "DATABASE_URL", sqlite_url),
+                patch.dict(
+                    os.environ,
+                    {"GEMINI_API_KEY": "", "VERCEL": "", "VERCEL_ENV": ""},
+                    clear=False,
+                ),
+            ):
+                check_response = self.post_transaction()
+                history_response = self.client.get("/transactions")
+
+        self.assertEqual(check_response.status_code, 200)
+        self.assertEqual(history_response.status_code, 200)
+        history = history_response.json()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["amount"], TRANSACTION["amount"])
+        self.assertEqual(history[0]["currency"], "INR")
+        self.assertEqual(history[0]["merchant"], TRANSACTION["receiver"])
+        self.assertEqual(history[0]["provider"], "rule_based_fallback")
+        self.assertEqual(history[0]["analysis_source"], "rule_based")
+
+    def test_invalid_transaction_input_returns_422(self):
+        invalid_transaction = {**TRANSACTION, "amount": -1}
+
+        response = self.client.post("/transaction/check", json=invalid_transaction)
+
+        self.assertEqual(response.status_code, 422)
 
     def test_gemini_503_retries_then_returns_fallback_200(self):
         error = main.GeminiRequestError("service unavailable", status_code=503)
