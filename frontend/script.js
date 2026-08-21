@@ -115,7 +115,7 @@ async function submitTransaction(event) {
 
         showResult(data);
         updateStats(data);
-        addHistory(data);
+        await loadTransactionHistory();
 
     } catch (error) {
 
@@ -136,6 +136,71 @@ async function submitTransaction(event) {
 }
 
 form.addEventListener("submit", submitTransaction);
+
+function formatTransactionDate(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+        ? "Unavailable"
+        : date.toLocaleString();
+}
+
+function setHistoryState(message, className = "no-data") {
+    historyBody.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 8;
+    cell.className = className;
+    cell.textContent = message;
+    row.appendChild(cell);
+    historyBody.appendChild(row);
+}
+
+function renderTransactionHistory(transactions) {
+    if (!transactions.length) {
+        setHistoryState("No transactions analyzed yet.");
+        return;
+    }
+
+    historyBody.replaceChildren();
+    transactions.forEach((transaction) => {
+        const row = document.createElement("tr");
+        const values = [
+            formatTransactionDate(transaction.created_at),
+            `₹${Number(transaction.amount).toLocaleString("en-IN")}`,
+            transaction.sender,
+            transaction.receiver,
+            `${transaction.risk_score}/100`,
+            transaction.risk_level,
+            transaction.decision,
+            transaction.analysis_source,
+        ];
+
+        values.forEach((value) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+        });
+        historyBody.appendChild(row);
+    });
+}
+
+async function loadTransactionHistory() {
+    setHistoryState("Loading transaction history…");
+    try {
+        const response = await fetch(`${API_URL}/transactions`);
+        if (!response.ok) {
+            throw new Error(`History request returned ${response.status}`);
+        }
+        const transactions = await response.json();
+        if (!Array.isArray(transactions)) {
+            throw new Error("History response was invalid");
+        }
+        renderTransactionHistory(transactions);
+    } catch (error) {
+        console.error(error);
+        setHistoryState("Unable to load transaction history. Please refresh and try again.");
+    }
+}
 
 function showResult(data) {
     const riskTitleEl = document.getElementById("riskTitle");
@@ -168,27 +233,8 @@ function updateStats(data) {
     blockedCount.textContent = stats.blocked;
 }
 
-function addHistory(data) {
-    const placeholder = historyBody.querySelector(".no-data");
-    if (placeholder) placeholder.closest("tr").remove();
-
-    const row = document.createElement("tr");
-    const values = [
-        data.transaction.sender,
-        `₹${Number(data.transaction.amount).toLocaleString("en-IN")}`,
-        data.risk_level,
-        data.decision
-    ];
-
-    values.forEach((value) => {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.appendChild(cell);
-    });
-
-    historyBody.prepend(row);
-}
-
 function getRiskColor(level) {
     return { LOW: "#52e39a", MEDIUM: "#f6c453", HIGH: "#ff6b6b" }[level] || "#6f8cff";
 }
+
+loadTransactionHistory();

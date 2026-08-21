@@ -11,10 +11,18 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from backend.database import (
+    DatabaseUnavailableError,
+    get_recent_transactions,
+    get_transaction,
+    save_transaction,
+)
 
 
 # Local-only .env loading does not override Vercel environment variables.
@@ -87,6 +95,28 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/transactions")
+def list_transactions():
+    try:
+        return get_recent_transactions()
+    except DatabaseUnavailableError as error:
+        logger.exception("Transaction history database is unavailable.")
+        raise HTTPException(status_code=503, detail="Transaction history is temporarily unavailable.") from error
+
+
+@app.get("/transactions/{transaction_id}")
+def read_transaction(transaction_id: int):
+    try:
+        transaction = get_transaction(transaction_id)
+    except DatabaseUnavailableError as error:
+        logger.exception("Transaction history database is unavailable.")
+        raise HTTPException(status_code=503, detail="Transaction history is temporarily unavailable.") from error
+
+    if transaction is None:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    return transaction
 
 
 def rule_based_assessment(transaction: Transaction) -> dict[str, Any]:
@@ -301,7 +331,7 @@ def check_transaction(transaction: Transaction):
             log_gemini_failure(error)
             analysis = rule_based_assessment(transaction)
 
-    return {
+    result = {
         "transaction": transaction.model_dump(),
         "risk_score": analysis["risk_score"],
         "risk_level": analysis["risk_level"],
@@ -309,3 +339,19 @@ def check_transaction(transaction: Transaction):
         "explanation": analysis["explanation"],
         "analysis_source": analysis["analysis_source"],
     }
+    try:
+        save_transaction(
+            {
+                **transaction.model_dump(),
+                "risk_score": result["risk_score"],
+                "risk_level": result["risk_level"],
+                "decision": result["decision"],
+                "ai_explanation": result["explanation"],
+                "analysis_source": result["analysis_source"],
+            }
+        )
+    except DatabaseUnavailableError as error:
+        logger.exception("Transaction analysis could not be persisted.")
+        raise HTTPException(status_code=503, detail="Transaction analysis could not be persisted.") from error
+
+    return result

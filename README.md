@@ -16,7 +16,7 @@ Manual transaction review is slow and difficult to scale. SentinelPay AI demonst
 - Gemini-powered assessment when `GEMINI_API_KEY` is configured and the service succeeds
 - Deterministic rule-based fallback when Gemini is unavailable
 - Clear frontend indication of Gemini versus fallback assessments
-- Risk score, risk level, decision, explanation, statistics, and transaction history
+- Risk score, risk level, decision, explanation, statistics, and persistent transaction history
 - Same-origin frontend/API deployment from one FastAPI service
 - Health endpoint for deployment monitoring
 
@@ -52,6 +52,8 @@ Copy-Item .env.example backend\.env
 
 Set `GEMINI_API_KEY` in `backend/.env` if you want Gemini analysis. It is optional; without it, the application remains fully usable with the rule-based fallback.
 
+Without `DATABASE_URL`, local development stores history in `backend/sentinelpay.db`. This local database is ignored by Git. For Vercel, configure a PostgreSQL `DATABASE_URL` so history persists across serverless invocations.
+
 Start the service:
 
 ```powershell
@@ -69,6 +71,7 @@ Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/
 | `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-3.6-flash`. |
 | `PORT` | Local server only | Port supplied to Uvicorn when running locally. Vercel manages the production runtime. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated HTTPS frontend origins. Leave empty for the included same-origin frontend. |
+| `DATABASE_URL` | Required on Vercel | PostgreSQL connection string for persistent transaction history. Local development falls back to `backend/sentinelpay.db`. |
 
 Never put `GEMINI_API_KEY` in frontend code, documentation examples, or Git commits.
 
@@ -109,6 +112,8 @@ Example response fields:
 - `GET /` redirects to the frontend.
 - `GET /frontend/` serves the web application.
 - `GET /health` returns `{ "status": "ok" }`.
+- `GET /transactions` returns the 50 newest persisted transactions.
+- `GET /transactions/{id}` returns one persisted transaction or `404`.
 
 ## Risk scoring
 
@@ -122,11 +127,12 @@ The repository deploys as one Vercel FastAPI application. `app.py` exposes the e
 
 1. Sign in at [Vercel](https://vercel.com/new), select **Add New** > **Project**, and import the GitHub repository `binayofficial10-art/sentinelpay-ai`.
 2. Leave the project root as the repository root. Vercel detects `app.py`, installs the root `requirements.txt`, and uses Python `3.12` from `.python-version`.
-3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` only if Gemini analysis is desired. Mark it for the desired Production/Preview environments; do not put it in source control or a frontend setting.
-4. Optionally add `GEMINI_MODEL` to select a supported Gemini model. If no key is supplied, the app safely uses its rule-based assessment.
-5. Click **Deploy**. On later updates, Vercel deploys new commits from the connected repository.
-6. Open `https://<your-vercel-domain>/health` and confirm it returns `{"status":"ok"}`.
-7. Open `https://<your-vercel-domain>/frontend/` on both a phone and a laptop. Submit the transaction form and confirm it returns an assessment.
+3. Provision a PostgreSQL database (for example, Vercel Postgres, Neon, or Supabase) and add its connection string as `DATABASE_URL` for both Production and Preview. This is required for persistent transaction history.
+4. Add `GEMINI_API_KEY` only if Gemini analysis is desired. Mark it for the desired Production/Preview environments; do not put it in source control or a frontend setting.
+5. Optionally add `GEMINI_MODEL` to select a supported Gemini model. If no key is supplied, the app safely uses its rule-based assessment.
+6. Click **Deploy**. On later updates, Vercel deploys new commits from the connected repository.
+7. Open `https://<your-vercel-domain>/health` and confirm it returns `{"status":"ok"}`.
+8. Open `https://<your-vercel-domain>/frontend/` on both a phone and a laptop. Submit the transaction form and confirm it returns an assessment and appears in the history table.
 
 For a deliberately separate frontend host, set the `sentinelpay-api-base-url` meta tag in `frontend/index.html` to the API's HTTPS URL and set `CORS_ALLOWED_ORIGINS` in Vercel to that exact frontend HTTPS origin. Do not use `*` for CORS.
 
@@ -139,7 +145,7 @@ For a deliberately separate frontend host, set the `sentinelpay-api-base-url` me
 
 ## Limitations
 
-- No real payment provider, transaction feed, or persistent database
+- No real payment provider or transaction feed
 - No authentication, authorization, audit log, rate limiting, or model monitoring
 - Demo scoring inputs are limited and not calibrated against real fraud outcomes
 - Browser history and summary statistics reset after refresh
