@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import unittest
+from urllib.error import URLError
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -78,8 +79,8 @@ class TransactionCheckTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(request_gemini.call_count, 2)
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
+        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
 
     def test_gemini_429_retries_then_returns_fallback_200(self):
         error = main.GeminiRequestError("rate limited", status_code=429)
@@ -94,8 +95,8 @@ class TransactionCheckTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(request_gemini.call_count, 2)
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
+        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
 
     def test_retry_after_is_capped_to_keep_request_short(self):
         error = main.GeminiRequestError("rate limited", status_code=429, retry_after_seconds=120)
@@ -177,7 +178,7 @@ class TransactionCheckTests(unittest.TestCase):
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
         request_gemini.assert_called_once()
 
-    def test_timeout_returns_fallback_with_one_short_retry(self):
+    def test_timeout_returns_fallback_after_two_retries(self):
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
             patch("backend.main.request_gemini", side_effect=socket.timeout("timed out")) as request_gemini,
@@ -188,8 +189,23 @@ class TransactionCheckTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["provider"], "rule_based_fallback")
-        self.assertEqual(request_gemini.call_count, 2)
-        sleep.assert_called_once()
+        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
+        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
+
+    def test_gemini_unavailable_network_error_returns_fallback(self):
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}),
+            patch("backend.main.request_gemini", side_effect=URLError("unavailable")) as request_gemini,
+            patch("backend.main.time.sleep") as sleep,
+            patch("backend.main.save_transaction"),
+        ):
+            response = self.post_transaction()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["analysis_source"], "rule_based")
+        self.assertEqual(response.json()["provider"], "rule_based_fallback")
+        self.assertEqual(request_gemini.call_count, main.GEMINI_MAX_RETRIES + 1)
+        self.assertEqual(sleep.call_count, main.GEMINI_MAX_RETRIES)
 
     def test_malformed_model_value_returns_fallback_and_persists_transaction(self):
         with (
