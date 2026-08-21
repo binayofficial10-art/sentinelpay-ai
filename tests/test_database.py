@@ -12,7 +12,7 @@ from backend import database
 
 RECORD = {
     "user_id": 1,
-    "amount": 25000.0,
+    "amount": "25000.00",
     "sender": "user123",
     "receiver": "merchant456",
     "location": "Bhubaneswar",
@@ -134,6 +134,53 @@ class DatabaseTests(unittest.TestCase):
                             "INSERT INTO transactions (user_id, amount, amount_minor, merchant, sender, receiver, location, device, velocity, risk_score, risk_level, decision, provider, explanation, ai_explanation, analysis_source) "
                             "VALUES (1, '0.00', 0, 'merchant', 'sender', 'receiver', 'Delhi', 'trusted', 1, 0, 'LOW', 'ALLOW', 'rule_based_fallback', 'fallback', 'fallback', 'rule_based')"
                         )
+
+    def test_direct_sqlite_writes_enforce_transaction_integrity_invariants(self):
+        columns = (
+            "user_id, amount, amount_minor, currency, merchant, sender, receiver, location, device, velocity, "
+            "risk_score, risk_level, decision, provider, explanation, ai_explanation, analysis_source, review_decision"
+        )
+        valid_values = (
+            1, "10.00", 1000, "INR", "merchant", "sender", "receiver", "Delhi", "trusted", 0,
+            0, "LOW", "ALLOW", "rule_based_fallback", "fallback", "fallback", "rule_based", None,
+        )
+        cases = {
+            "currency": {"currency": "inr"},
+            "velocity": {"velocity": -1},
+            "risk_score_below": {"risk_score": -1},
+            "risk_score_above": {"risk_score": 101},
+            "risk_level": {"risk_level": "CRITICAL"},
+            "decision": {"decision": "DENY"},
+            "review_decision": {"review_decision": "PENDING"},
+            "analysis_source": {"analysis_source": "unknown"},
+            "provider": {"provider": "unknown"},
+            "analysis_provider_pair": {"analysis_source": "gemini"},
+            "zero_amount": {"amount": "0.00", "amount_minor": 0},
+            "negative_amount": {"amount": "-0.01", "amount_minor": -1},
+            "amount_minor_zero": {"amount_minor": 0},
+            "amount_minor_negative": {"amount_minor": -1},
+            "amount_minor_mismatch": {"amount_minor": 999},
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "transaction-integrity.db"
+            with patch.object(database, "DATABASE_URL", f"sqlite:///{database_path.as_posix()}"):
+                with database.get_connection() as connection:
+                    database.ensure_schema(connection)
+                    connection.execute("INSERT INTO users (id, email, password_hash) VALUES (1, 'user@example.com', 'test-hash')")
+                    placeholders = ", ".join("?" for _ in valid_values)
+                    for name, changes in cases.items():
+                        row = dict(zip(columns.split(", "), valid_values))
+                        row.update(changes)
+                        with self.subTest(name=name), self.assertRaises(sqlite3.IntegrityError):
+                            connection.execute(
+                                f"INSERT INTO transactions ({columns}) VALUES ({placeholders})",
+                                tuple(row[column] for column in columns.split(", ")),
+                            )
+                    connection.execute(
+                        f"INSERT INTO transactions ({columns}) VALUES ({placeholders})",
+                        valid_values,
+                    )
+                    self.assertEqual(connection.execute("SELECT count(*) FROM transactions").fetchone()[0], 1)
 
     def test_sqlite_migrates_existing_transaction_history_additively(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

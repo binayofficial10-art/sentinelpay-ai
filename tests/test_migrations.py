@@ -101,6 +101,28 @@ class MigrationContractTests(unittest.TestCase):
         self.assertNotIn("BEGIN", executable)
         self.assertNotIn("COMMIT", executable)
 
+    def test_transaction_integrity_migration_enforces_canonical_postgres_invariants(self):
+        sql = self.read("004_transaction_integrity_constraints.sql")
+        database_source = (Path(__file__).resolve().parent.parent / "backend" / "database.py").read_text(encoding="utf-8")
+        self.assertIn("BEGIN;", sql)
+        self.assertIn("COMMIT;", sql)
+        self.assertIn("SET LOCAL lock_timeout = '5s'", sql)
+        self.assertIn("numeric_precision = 14", sql)
+        self.assertIn("numeric_scale = 2", sql)
+        self.assertIn("amount NUMERIC(14, 2) NOT NULL", database_source)
+        for constraint in (
+            "transactions_currency_format", "transactions_velocity_nonnegative", "transactions_risk_score_range",
+            "transactions_risk_level_allowed", "transactions_decision_allowed", "transactions_review_decision_allowed",
+            "transactions_analysis_source_allowed", "transactions_provider_allowed", "transactions_analysis_provider_match",
+            "transactions_amount_positive", "transactions_amount_minor_consistent",
+        ):
+            self.assertIn(constraint, sql)
+        self.assertIn("amount = amount_minor::numeric / 100", sql)
+        self.assertNotIn("double precision", sql.lower())
+        executable = "\n".join(line for line in sql.upper().splitlines() if not line.lstrip().startswith("--"))
+        self.assertIsNone(re.search(r"(?m)^\s*(DROP|TRUNCATE|DELETE|UPDATE)\b", executable))
+        self.assertIn("idx_transactions_user_idempotency", self.read("003_transactions_idempotency_index.sql"))
+
 
 if __name__ == "__main__":
     unittest.main()

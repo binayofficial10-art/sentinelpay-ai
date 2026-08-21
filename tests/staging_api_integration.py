@@ -124,6 +124,76 @@ def concurrent_idempotency_bursts(
         )
 
 
+def verify_direct_postgres_transaction_constraints(harness: StagingHttpHarness, suite: Suite, marker: str) -> None:
+    """Prove staging rejects invalid direct writes; rollback leaves no test data."""
+    import psycopg
+    from psycopg import errors
+
+    columns = (
+        "user_id, amount, amount_minor, currency, merchant, sender, receiver, location, device, velocity, "
+        "risk_score, risk_level, decision, provider, explanation, ai_explanation, analysis_source, review_decision, idempotency_key"
+    )
+    base = {
+        "amount": "10.00", "amount_minor": 1000, "currency": "INR", "merchant": "merchant",
+        "sender": marker, "receiver": "receiver", "location": "Delhi", "device": "trusted", "velocity": 0,
+        "risk_score": 0, "risk_level": "LOW", "decision": "ALLOW", "provider": "rule_based_fallback",
+        "explanation": "fallback", "ai_explanation": "fallback", "analysis_source": "rule_based",
+        "review_decision": None, "idempotency_key": None,
+    }
+    invalid_cases = {
+        "invalid_currency": {"currency": "inr"},
+        "negative_velocity": {"velocity": -1},
+        "risk_score_below_range": {"risk_score": -1},
+        "risk_score_above_range": {"risk_score": 101},
+        "invalid_risk_level": {"risk_level": "CRITICAL"},
+        "invalid_decision": {"decision": "DENY"},
+        "invalid_review_decision": {"review_decision": "PENDING"},
+        "invalid_analysis_source": {"analysis_source": "unknown"},
+        "invalid_provider": {"provider": "unknown"},
+        "invalid_analysis_provider_pair": {"analysis_source": "gemini"},
+        "zero_amount": {"amount": "0.00", "amount_minor": 0},
+        "negative_amount": {"amount": "-0.01", "amount_minor": -1},
+        "zero_amount_minor": {"amount_minor": 0},
+        "negative_amount_minor": {"amount_minor": -1},
+        "amount_minor_mismatch": {"amount_minor": 999},
+    }
+    placeholders = ", ".join("%s" for _ in columns.split(", "))
+    insert = f"INSERT INTO transactions ({columns}) VALUES ({placeholders})"
+    with psycopg.connect(harness.staging_url) as connection:
+        try:
+            user_id = connection.execute(
+                "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, 'viewer') RETURNING id",
+                (f"{marker}-direct-constraints@example.test", "test-hash"),
+            ).fetchone()[0]
+            for step, changes in invalid_cases.items():
+                values = {**base, **changes, "user_id": user_id}
+                connection.execute("SAVEPOINT direct_constraint_case")
+                try:
+                    connection.execute(insert, tuple(values[column] for column in columns.split(", ")))
+                except errors.CheckViolation:
+                    connection.execute("ROLLBACK TO SAVEPOINT direct_constraint_case")
+                    suite.check(f"direct_postgres_{step}_rejected", True)
+                else:
+                    raise IntegrationFailure(f"direct_postgres_{step}: invalid direct write was accepted")
+                finally:
+                    connection.execute("RELEASE SAVEPOINT direct_constraint_case")
+            first = {**base, "user_id": user_id, "idempotency_key": f"{marker}-direct-idempotency"}
+            connection.execute(insert, tuple(first[column] for column in columns.split(", ")))
+            connection.execute("SAVEPOINT direct_constraint_idempotency")
+            try:
+                connection.execute(insert, tuple(first[column] for column in columns.split(", ")))
+            except errors.UniqueViolation:
+                connection.execute("ROLLBACK TO SAVEPOINT direct_constraint_idempotency")
+                suite.check("direct_postgres_idempotency_preserved", True)
+            else:
+                raise IntegrationFailure("direct_postgres_idempotency: duplicate direct write was accepted")
+            finally:
+                connection.execute("RELEASE SAVEPOINT direct_constraint_idempotency")
+            suite.check("direct_postgres_valid_transaction_accepted", True)
+        finally:
+            connection.rollback()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", choices=("affected", "full"), required=True)
@@ -134,6 +204,7 @@ def main() -> int:
     exit_code = 1
     try:
         harness.verify_staging_schema()
+        verify_direct_postgres_transaction_constraints(harness, suite, marker)
         harness.start()
         harness.emit(f"MARKER {marker}")
         analyst_client = harness.new_client()
