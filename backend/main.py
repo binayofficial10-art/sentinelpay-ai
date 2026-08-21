@@ -4,7 +4,10 @@ import math
 import os
 import random
 import re
+import socket
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -35,9 +38,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-GEMINI_MAX_RETRIES = 2
+GEMINI_MAX_RETRIES = 1
 GEMINI_RETRY_BASE_DELAY_SECONDS = 0.25
 GEMINI_RETRY_JITTER_SECONDS = 0.1
+GEMINI_REQUEST_TIMEOUT_SECONDS = 3
+GEMINI_MAX_RETRY_AFTER_SECONDS = 1
 
 
 def get_cors_allowed_origins() -> list[str]:
@@ -63,31 +68,71 @@ if cors_allowed_origins:
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/frontend", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
-api_key = os.getenv("GEMINI_API_KEY")
-gemini_model = os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
-
 
 class GeminiRequestError(Exception):
     """Gemini REST error with safe diagnostic details for server-side logs."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, response_body: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_body: str = "",
+        retry_after_seconds: float | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+        self.retry_after_seconds = retry_after_seconds
+
+
+def get_gemini_configuration() -> tuple[str | None, str]:
+    """Read Gemini configuration only from the process environment.
+
+    generateContent expects a bare model ID because the URL template adds the
+    ``models/`` path segment itself. Reject copied assignment/path prefixes
+    rather than making a misleading request to Gemini.
+    """
+    key = os.getenv("GEMINI_API_KEY")
+    model = os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
+    if model.startswith("GEMINI_MODEL=") or model.startswith("models/") or "/" in model:
+        raise GeminiRequestError(
+            "GEMINI_MODEL must be a bare model name (for example, gemini-3.7-flash)"
+        )
+    return key, model
 
 
 def is_transient_gemini_error(error: Exception) -> bool:
     """Return whether a bounded retry is appropriate for a Gemini REST request."""
     if isinstance(error, GeminiRequestError):
         return error.status_code in GEMINI_RETRYABLE_STATUS_CODES
-    return isinstance(error, URLError)
+    return isinstance(error, (URLError, TimeoutError, socket.timeout))
 
 
-def gemini_retry_delay(attempt: int) -> float:
+def gemini_retry_delay(attempt: int, error: Exception) -> float:
     """Use capped retries with exponential backoff and a small random jitter."""
+    retry_after = getattr(error, "retry_after_seconds", None)
+    if retry_after is not None:
+        return min(max(retry_after, 0), GEMINI_MAX_RETRY_AFTER_SECONDS)
     return (GEMINI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)) + random.uniform(
         0, GEMINI_RETRY_JITTER_SECONDS
     )
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse HTTP Retry-After seconds or date without extending request time."""
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 class Transaction(BaseModel):
@@ -272,11 +317,8 @@ def parse_gemini_response(response_body: str) -> dict[str, Any]:
         ) from error
 
 
-def request_gemini(transaction: Transaction) -> str:
+def request_gemini(transaction: Transaction, *, api_key: str, gemini_model: str) -> str:
     """Call Gemini generateContent over REST and return its raw JSON response body."""
-    if not api_key:
-        raise GeminiRequestError("GEMINI_API_KEY is not configured")
-
     request = Request(
         GEMINI_API_URL_TEMPLATE.format(model=gemini_model),
         data=json.dumps(build_gemini_request_payload(transaction)).encode("utf-8"),
@@ -287,49 +329,56 @@ def request_gemini(transaction: Transaction) -> str:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=GEMINI_REQUEST_TIMEOUT_SECONDS) as response:
             return response.read().decode("utf-8")
     except HTTPError as error:
         response_body = error.read().decode("utf-8", errors="replace")
+        retry_after_seconds = parse_retry_after(
+            error.headers.get("Retry-After") if error.headers else None
+        )
         raise GeminiRequestError(
             f"Gemini REST request failed with HTTP {error.code}",
             status_code=error.code,
             response_body=response_body,
+            retry_after_seconds=retry_after_seconds,
         ) from error
     except URLError:
         raise
 
 
-def generate_gemini_assessment(transaction: Transaction) -> dict[str, Any]:
+def generate_gemini_assessment(
+    transaction: Transaction, *, api_key: str, gemini_model: str
+) -> dict[str, Any]:
     """Request and validate Gemini output with bounded retries for transient failures."""
     for attempt in range(GEMINI_MAX_RETRIES + 1):
         try:
-            return parse_gemini_response(request_gemini(transaction))
+            return parse_gemini_response(
+                request_gemini(transaction, api_key=api_key, gemini_model=gemini_model)
+            )
         except Exception as error:
             if attempt < GEMINI_MAX_RETRIES and is_transient_gemini_error(error):
-                delay = gemini_retry_delay(attempt)
+                delay = gemini_retry_delay(attempt, error)
                 logger.warning(
                     "Gemini REST request failed transiently; retrying after %.2fs. model=%s status=%s key_configured=%s detail=%s",
                     delay,
                     gemini_model,
                     getattr(error, "status_code", None),
-                    bool(api_key),
-                    getattr(error, "response_body", str(error)),
+                    True,
+                    type(error).__name__,
                 )
                 time.sleep(delay)
                 continue
             raise
 
 
-def log_gemini_failure(error: Exception) -> None:
+def log_gemini_failure(error: Exception, *, gemini_model: str | None, key_configured: bool) -> None:
     """Log actionable Gemini REST diagnostics without ever logging the API key."""
     logger.error(
-        "Gemini REST assessment failed; using rule-based fallback. model=%s key_configured=%s status=%s error_type=%s response_body=%s detail=%s",
+        "Gemini REST assessment failed; using rule-based fallback. model=%s key_configured=%s status=%s error_type=%s detail=%s",
         gemini_model,
-        bool(api_key),
+        key_configured,
         getattr(error, "status_code", None),
         type(error).__name__,
-        getattr(error, "response_body", ""),
         error,
         exc_info=True,
     )
@@ -337,15 +386,23 @@ def log_gemini_failure(error: Exception) -> None:
 
 @app.post("/transaction/check")
 def check_transaction(transaction: Transaction):
-    if not api_key:
-        logger.info("GEMINI_API_KEY is not configured; using rule-based fallback.")
+    try:
+        api_key, gemini_model = get_gemini_configuration()
+    except GeminiRequestError as error:
+        log_gemini_failure(error, gemini_model=None, key_configured=bool(os.getenv("GEMINI_API_KEY")))
         analysis = rule_based_assessment(transaction)
     else:
-        try:
-            analysis = generate_gemini_assessment(transaction)
-        except Exception as error:
-            log_gemini_failure(error)
+        if not api_key:
+            logger.info("GEMINI_API_KEY is not configured; using rule-based fallback.")
             analysis = rule_based_assessment(transaction)
+        else:
+            try:
+                analysis = generate_gemini_assessment(
+                    transaction, api_key=api_key, gemini_model=gemini_model
+                )
+            except Exception as error:
+                log_gemini_failure(error, gemini_model=gemini_model, key_configured=True)
+                analysis = rule_based_assessment(transaction)
 
     result = {
         "transaction": transaction.model_dump(),
