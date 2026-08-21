@@ -50,9 +50,11 @@ def verify_password(password: str, encoded_hash: str) -> bool:
     return hmac.compare_digest(candidate, digest_hex)
 
 
-def create_user(email: str, password: str) -> dict[str, Any]:
+def create_user(email: str, password: str, *, role: str = "viewer") -> dict[str, Any]:
     if not persistence_enabled():
         raise DatabaseUnavailableError("Authentication storage is unavailable")
+    if role not in {"viewer", "analyst", "admin"}:
+        raise ValueError("Invalid application role")
     placeholder = "?" if using_sqlite() else "%s"
     try:
         with get_connection() as connection:
@@ -63,9 +65,9 @@ def create_user(email: str, password: str) -> dict[str, Any]:
             if existing_user:
                 raise DuplicateUserError("Email is already registered")
             row = connection.execute(
-                f"INSERT INTO users (email, password_hash) VALUES ({placeholder}, {placeholder}) "
-                "RETURNING id, email, created_at",
-                (normalize_email(email), hash_password(password)),
+                f"INSERT INTO users (email, password_hash, role) VALUES ({placeholder}, {placeholder}, {placeholder}) "
+                "RETURNING id, email, role, created_at",
+                (normalize_email(email), hash_password(password), role),
             ).fetchone()
             return dict(row)
     except DuplicateUserError:
@@ -83,7 +85,7 @@ def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
     with get_connection() as connection:
         ensure_schema(connection)
         row = connection.execute(
-            f"SELECT id, email, password_hash, created_at FROM users WHERE email = {placeholder}",
+            f"SELECT id, email, password_hash, role, created_at FROM users WHERE email = {placeholder}",
             (normalize_email(email),),
         ).fetchone()
     user = dict(row) if row else None
@@ -92,7 +94,7 @@ def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
         return None
     if not verify_password(password, user["password_hash"]):
         return None
-    return {key: user[key] for key in ("id", "email", "created_at")}
+    return {key: user[key] for key in ("id", "email", "role", "created_at")}
 
 
 def token_digest(token: str) -> str:
@@ -122,7 +124,7 @@ def get_user_for_session(token: str | None) -> dict[str, Any]:
     with get_connection() as connection:
         ensure_schema(connection)
         row = connection.execute(
-            "SELECT users.id, users.email, users.created_at, sessions.expires_at "
+            "SELECT users.id, users.email, users.role, users.created_at, sessions.expires_at "
             "FROM sessions JOIN users ON users.id = sessions.user_id "
             f"WHERE sessions.token_hash = {placeholder}",
             (token_digest(token),),

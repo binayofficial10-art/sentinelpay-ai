@@ -17,6 +17,15 @@ If Gemini is unavailable, returns an error, reaches a quota limit, or produces i
 
 ## 2. Key Features
 
+### Premium risk-intelligence workspace
+
+The authenticated dashboard presents a responsive, original SentinelPay design system with a live transaction analysis workflow, animated risk score, deterministic signal cards, AI/fallback disclosure, decision trace, accessible toast/error states, and a mobile-safe transaction table. It uses no client-side mock data: history, analytics, review queue, and system status all come from authenticated API responses.
+
+- **Analytics** reports real per-user totals, decisions, risk distribution, AI/fallback usage, and average risk score. When processing-time data is not available it explicitly says so.
+- **Review queue** surfaces persisted medium/high-risk assessments. Approve and Block submit authenticated server-side requests, update the persisted record, and create a `manual_review` audit event. These manual decisions do not alter the risk engine policy.
+- **Security Center** receives safe system health states from `/system-status`; it never exposes secrets or environment values.
+- **Merchant profile / policy** are deliberately not represented as security controls yet. Existing storage does not contain a merchant-wide aggregate or server-side policy model, so changing a browser setting cannot affect decisions.
+
 - Responsive HTML, CSS, and JavaScript dashboard for phone and laptop browsers
 - Transaction form with amount, sender, receiver, location, device, and velocity fields
 - FastAPI input validation for transaction requests
@@ -110,6 +119,15 @@ GEMINI_MODEL=gemini-3.7-flash
 CORS_ALLOWED_ORIGINS=
 FRONTEND_API_BASE_URL=
 DATABASE_URL=
+SECURITY_HASH_SECRET=
+RATE_LIMIT_REGISTER_MAX_REQUESTS=5
+RATE_LIMIT_REGISTER_WINDOW_SECONDS=60
+RATE_LIMIT_LOGIN_MAX_REQUESTS=10
+RATE_LIMIT_LOGIN_WINDOW_SECONDS=60
+RATE_LIMIT_TRANSACTION_CHECK_MAX_REQUESTS=30
+RATE_LIMIT_TRANSACTION_CHECK_WINDOW_SECONDS=60
+RATE_LIMIT_AUTHENTICATED_MAX_REQUESTS=120
+RATE_LIMIT_AUTHENTICATED_WINDOW_SECONDS=60
 ```
 
 | Variable | Required | Description |
@@ -118,14 +136,52 @@ DATABASE_URL=
 | `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.7-flash`. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated allowed origins for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
 | `FRONTEND_API_BASE_URL` | No | Public HTTPS API origin only for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
-| `DATABASE_URL` | No locally; required for persistent Vercel history | Hosted PostgreSQL connection string. Vercel must not use a file-based SQLite path for persistence. |
+| `DATABASE_URL` | No locally; required on Vercel | Hosted PostgreSQL connection string for authentication, history, shared rate limits, and audit logs. Vercel must not use a file-based SQLite path. |
+| `SECURITY_HASH_SECRET` | Required on Vercel | Secret used to HMAC source identifiers. Raw IP addresses are never persisted in audit or rate-limit tables. |
+| `RATE_LIMIT_REGISTER_MAX_REQUESTS` / `RATE_LIMIT_REGISTER_WINDOW_SECONDS` | No | Shared registration fixed-window limit; defaults to 5 requests per 60 seconds per source. |
+| `RATE_LIMIT_LOGIN_MAX_REQUESTS` / `RATE_LIMIT_LOGIN_WINDOW_SECONDS` | No | Shared login fixed-window limit; defaults to 10 requests per 60 seconds per source. |
+| `RATE_LIMIT_TRANSACTION_CHECK_MAX_REQUESTS` / `RATE_LIMIT_TRANSACTION_CHECK_WINDOW_SECONDS` | No | Shared transaction-check fixed-window limit; defaults to 30 requests per 60 seconds per authenticated user. |
+| `RATE_LIMIT_AUTHENTICATED_MAX_REQUESTS` / `RATE_LIMIT_AUTHENTICATED_WINDOW_SECONDS` | No | Shared limit for other authenticated endpoints; defaults to 120 requests per 60 seconds per user. |
 | `PORT` | Local runtime | Port passed to Uvicorn. Vercel manages the production runtime. |
 
 For local use, copy `.env.example` to `backend/.env` and edit the copied file. `backend/main.py` loads that file without overriding environment variables already provided by Vercel. The local `.env` file is ignored by Git.
 
-In Vercel, open the project **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for the intended Production and/or Preview environments, and optionally add `GEMINI_MODEL`. Add a PostgreSQL `DATABASE_URL` for durable transaction history. The included frontend is served by FastAPI on the same origin, so leave `FRONTEND_API_BASE_URL` and `CORS_ALLOWED_ORIGINS` empty. For an intentionally separate frontend, set `FRONTEND_API_BASE_URL` to the API HTTPS origin and `CORS_ALLOWED_ORIGINS` to the exact frontend HTTPS origin—never `*`. Do not add the Gemini key to frontend settings or source files.
+In Vercel, open the project **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for the intended Production and/or Preview environments, and optionally add `GEMINI_MODEL`. Add a PostgreSQL `DATABASE_URL` and a strong `SECURITY_HASH_SECRET`; authentication, shared rate limits, and audit logging require PostgreSQL on Vercel. The included frontend is served by FastAPI on the same origin, so leave `FRONTEND_API_BASE_URL` and `CORS_ALLOWED_ORIGINS` empty. For an intentionally separate frontend, set `FRONTEND_API_BASE_URL` to the API HTTPS origin and `CORS_ALLOWED_ORIGINS` to the exact frontend HTTPS origin—never `*`. Do not add the Gemini key to frontend settings or source files.
+
+## 9.1 Security Controls
+
+Authentication, transaction checks, and authenticated data endpoints use database-backed fixed-window limits. This shares state across Vercel instances through PostgreSQL and returns HTTP `429` with `Retry-After` when a limit is exceeded. The application stores security audit events for registrations, login outcomes, logout, transaction checks, unauthorized requests, and rate-limit violations. Audit records intentionally exclude passwords, session tokens, API keys, database URLs, and transaction payloads. Users can retrieve only their own safe audit history at `GET /audit-events`.
 
 ## 10. Local Development
+
+### PostgreSQL migrations
+
+Before deploying a new version against an existing Neon/PostgreSQL database, apply the versioned SQL files in `migrations/` with a privileged migration connection. Application request handlers intentionally do not run PostgreSQL DDL. These files support the current SentinelPay schema baseline only; they intentionally fail before changing a database that lacks the required authentication, audit, alert, or transaction schema.
+
+Run the read-only preflight first. It detects unsupported schemas, invalid/over-precision amounts, unsupported pre-existing roles, duplicate idempotency keys, and an incompatible pre-existing idempotency index. It performs no DDL or data writes:
+
+```powershell
+psql "$env:STAGING_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_preflight_sentinelpay_schema.sql
+```
+
+If preflight succeeds, run the transactional migrations in order during a maintenance window. Both set a five-second lock timeout and roll back fully if a check or schema operation fails:
+
+```powershell
+psql "$env:STAGING_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_roles_and_idempotency.sql
+psql "$env:STAGING_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_exact_money_and_transaction_atomicity.sql
+```
+
+Finally run the concurrent unique partial index file with `psql` autocommit enabled (do not wrap it in `BEGIN`/`COMMIT`):
+
+```powershell
+psql "$env:STAGING_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_transactions_idempotency_index.sql
+```
+
+Forward recovery: if any step fails, do not deploy or manually alter production data. Correct the reported unsupported/invalid data state with an approved data-remediation plan, rerun preflight, then rerun the failed migration. The migrations never drop or truncate business data. Do not attempt a rollback that removes populated columns; deploy a new forward-only corrective migration instead.
+
+Amounts are accepted as JSON numbers or strings only when they have at most two decimal places. The API emits fixed two-decimal strings (for example, `"25000.00"`) and persists canonical integer minor units, so application code never performs monetary calculations with binary floating-point values.
+
+New accounts receive the `viewer` role. Only server-side `analyst` and `admin` roles can record manual transaction decisions or change alert status. Existing users are safely migrated to `viewer` and must be explicitly promoted through an authorized operational process before they can perform those actions.
 
 From the repository root in PowerShell:
 
@@ -248,6 +304,18 @@ When Vercel has no usable PostgreSQL `DATABASE_URL`, this endpoint returns an em
 Example request: `GET /transactions/1`
 
 Example response: one transaction object in the format returned by `GET /transactions`. If the record does not exist, the API returns `404`.
+
+### `GET /analytics`
+
+**Purpose:** Return authenticated, per-user aggregates computed only from persisted transactions. Empty histories return zero counts and `null` for the average risk score; no synthetic history is generated.
+
+### `GET /system-status`
+
+**Purpose:** Return safe operational labels for the AI configuration, database reachability, fallback engine, authentication, audit logging, and CORS posture. It never returns credentials, connection strings, or other environment values.
+
+### `POST /transactions/{id}/review`
+
+**Purpose:** Persist an authenticated user's manual `APPROVE` or `BLOCK` decision for one of that user's own transactions. The operation is authorized at the database query, and writes a `manual_review` audit event. It does not change server-side risk thresholds or the automated risk assessment.
 
 ## 12. Deployment
 

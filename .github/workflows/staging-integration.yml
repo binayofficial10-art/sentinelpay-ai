@@ -1,0 +1,125 @@
+name: Staging integration gate
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging-integration-gate:
+    name: staging-integration-gate
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    concurrency:
+      group: sentinelpay-staging-integration
+      cancel-in-progress: false
+    env:
+      STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+      STAGING_DATABASE_URL_SHA256: ${{ secrets.STAGING_DATABASE_URL_SHA256 }}
+      SENTINELPAY_CI_ENVIRONMENT: staging
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install application dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify sanitized staging configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import hashlib
+          import hmac
+          from urllib.parse import urlsplit
+
+          value = os.environ.get("STAGING_DATABASE_URL", "").strip()
+          if not value:
+              sys.exit("STAGING_DATABASE_URL is required for the staging integration gate.")
+          expected_fingerprint = os.environ.get("STAGING_DATABASE_URL_SHA256", "").strip().lower()
+          if len(expected_fingerprint) != 64:
+              sys.exit("STAGING_DATABASE_URL_SHA256 is required and must be a SHA-256 fingerprint.")
+          actual_fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()
+          if not hmac.compare_digest(actual_fingerprint, expected_fingerprint):
+              sys.exit("Database URL does not match the approved staging fingerprint.")
+          parsed = urlsplit(value)
+          if parsed.scheme not in {"postgresql", "postgres"} or not parsed.hostname:
+              sys.exit("STAGING_DATABASE_URL must be a PostgreSQL connection URL.")
+          target = value.lower()
+          if "prod" in target or "production" in target:
+              sys.exit("Refusing a database URL that appears to target production.")
+          if os.environ.get("SENTINELPAY_CI_ENVIRONMENT") != "staging":
+              sys.exit("Staging CI environment marker is invalid.")
+          print("Staging integration target configured: PostgreSQL URL present (redacted).")
+          print("CI environment: staging")
+          PY
+
+      - name: Run full real-HTTP staging integration suite
+        run: python -m tests.staging_api_integration --scenario full
+
+      - name: Sanitize staging diagnostics on failure
+        id: sanitize_diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          raw_directory = Path("/tmp")
+          output_directory = Path(os.environ["RUNNER_TEMP"]) / "sentinelpay-staging-artifacts" / "sanitized"
+          output_directory.mkdir(parents=True, exist_ok=True)
+          secret_values = [
+              os.environ.get("STAGING_DATABASE_URL", ""),
+              os.environ.get("STAGING_DATABASE_URL_SHA256", ""),
+          ]
+          patterns = [
+              (re.compile(r"postgres(?:ql)?://[^\s\"']+", re.IGNORECASE), "[REDACTED_DATABASE_URL]"),
+              (re.compile(r"(?im)^(authorization\s*:\s*)(?:bearer\s+)?\S+"), r"\1[REDACTED_AUTHORIZATION]"),
+              (re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+"), "Bearer [REDACTED_TOKEN]"),
+              (re.compile(r"(?im)^(set-cookie|cookie)\s*:\s*.+$"), r"\1: [REDACTED_COOKIE]"),
+              (re.compile(r"(?im)([\"']?(?:password|passwd|api[_-]?key|token|secret|database_url|authorization|cookie)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,}]+)"), r"\1[REDACTED]"),
+          ]
+          raw_files = sorted(raw_directory.glob("sentinelpay-staging-it-*.client.log"))
+          raw_files += sorted(raw_directory.glob("sentinelpay-staging-it-*.server.log"))
+          for raw_file in raw_files:
+              content = raw_file.read_text(encoding="utf-8", errors="replace")
+              for secret in secret_values:
+                  if secret:
+                      content = content.replace(secret, "[REDACTED_SECRET]")
+              for pattern, replacement in patterns:
+                  content = pattern.sub(replacement, content)
+              temporary = output_directory / f".{raw_file.name}.tmp"
+              destination = output_directory / raw_file.name
+              temporary.write_text(content, encoding="utf-8")
+              temporary.replace(destination)
+          (output_directory / "SANITIZATION_COMPLETE").write_text(
+              "Sanitized SentinelPay staging diagnostics only.\n", encoding="utf-8"
+          )
+          print("Sanitized staging diagnostic artifacts prepared.")
+          PY
+
+      - name: Upload sanitized staging diagnostics on failure
+        if: failure() && steps.sanitize_diagnostics.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-integration-diagnostics-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/sentinelpay-staging-artifacts/sanitized
