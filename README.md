@@ -52,7 +52,7 @@ Copy-Item .env.example backend\.env
 
 Set `GEMINI_API_KEY` in `backend/.env` if you want Gemini analysis. It is optional; without it, the application remains fully usable with the rule-based fallback.
 
-Without `DATABASE_URL`, local development stores history in `backend/sentinelpay.db`. This local database is ignored by Git. For Vercel, configure a PostgreSQL `DATABASE_URL` so history persists across serverless invocations.
+Without `DATABASE_URL`, local development stores history in `backend/sentinelpay.db`. This local database is ignored by Git. Vercel never attempts file-based SQLite storage; add a PostgreSQL `DATABASE_URL` when persistent production history is needed.
 
 Start the service:
 
@@ -71,7 +71,7 @@ Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) or [http://127.0.0.1:8000/
 | `GEMINI_MODEL` | No | Gemini model name; defaults to `gemini-3.6-flash`. |
 | `PORT` | Local server only | Port supplied to Uvicorn when running locally. Vercel manages the production runtime. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated HTTPS frontend origins. Leave empty for the included same-origin frontend. |
-| `DATABASE_URL` | Required on Vercel | PostgreSQL connection string for persistent transaction history. Local development falls back to `backend/sentinelpay.db`. |
+| `DATABASE_URL` | Optional on Vercel | PostgreSQL connection string for persistent transaction history. Without it, analyses still succeed but Vercel returns an empty history list. Local development falls back to `backend/sentinelpay.db`. |
 
 Never put `GEMINI_API_KEY` in frontend code, documentation examples, or Git commits.
 
@@ -105,7 +105,7 @@ Example response fields:
 }
 ```
 
-`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `fallback`.
+`analysis_source` is `gemini` only after a valid Gemini response; otherwise it is `rule_based`.
 
 ### Other endpoints
 
@@ -127,7 +127,7 @@ The repository deploys as one Vercel FastAPI application. `app.py` exposes the e
 
 1. Sign in at [Vercel](https://vercel.com/new), select **Add New** > **Project**, and import the GitHub repository `binayofficial10-art/sentinelpay-ai`.
 2. Leave the project root as the repository root. Vercel detects `app.py`, installs the root `requirements.txt`, and uses Python `3.12` from `.python-version`.
-3. Provision a PostgreSQL database (for example, Vercel Postgres, Neon, or Supabase) and add its connection string as `DATABASE_URL` for both Production and Preview. This is required for persistent transaction history.
+3. For persistent production history, provision a PostgreSQL database (for example, Vercel Postgres, Neon, or Supabase) and add its connection string as `DATABASE_URL` for both Production and Preview. Without it, analyses remain available but history is not persisted on Vercel.
 4. Add `GEMINI_API_KEY` only if Gemini analysis is desired. Mark it for the desired Production/Preview environments; do not put it in source control or a frontend setting.
 5. Optionally add `GEMINI_MODEL` to select a supported Gemini model. If no key is supplied, the app safely uses its rule-based assessment.
 6. Click **Deploy**. On later updates, Vercel deploys new commits from the connected repository.

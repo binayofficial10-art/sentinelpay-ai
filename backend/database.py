@@ -55,6 +55,13 @@ def using_sqlite() -> bool:
     return not DATABASE_URL or DATABASE_URL.startswith("sqlite:///")
 
 
+def persistence_enabled() -> bool:
+    """Use SQLite locally, but never attempt file storage in Vercel functions."""
+    if os.getenv("VERCEL"):
+        return bool(DATABASE_URL) and not DATABASE_URL.startswith("sqlite:///")
+    return True
+
+
 def sqlite_path() -> str:
     if DATABASE_URL.startswith("sqlite:///"):
         return DATABASE_URL.removeprefix("sqlite:///")
@@ -101,8 +108,11 @@ def serialize_transaction(row: Any) -> dict[str, Any]:
     return transaction
 
 
-def save_transaction(record: dict[str, Any]) -> dict[str, Any]:
+def save_transaction(record: dict[str, Any]) -> dict[str, Any] | None:
     """Save one assessment and return the stored record, including its database id."""
+    if not persistence_enabled():
+        return None
+
     columns = (
         "amount", "sender", "receiver", "location", "device", "velocity",
         "risk_score", "risk_level", "decision", "ai_explanation", "analysis_source",
@@ -122,6 +132,9 @@ def save_transaction(record: dict[str, Any]) -> dict[str, Any]:
 
 def get_recent_transactions(limit: int = 50) -> list[dict[str, Any]]:
     """Return recent assessments newest first."""
+    if not persistence_enabled():
+        return []
+
     placeholder = "?" if using_sqlite() else "%s"
     query = (
         "SELECT id, amount, sender, receiver, location, device, velocity, risk_score, "
@@ -135,6 +148,9 @@ def get_recent_transactions(limit: int = 50) -> list[dict[str, Any]]:
 
 def get_transaction(transaction_id: int) -> dict[str, Any] | None:
     """Return one persisted transaction, or None when it does not exist."""
+    if not persistence_enabled():
+        return None
+
     placeholder = "?" if using_sqlite() else "%s"
     query = (
         "SELECT id, amount, sender, receiver, location, device, velocity, risk_score, "

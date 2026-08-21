@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+GEMINI_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 
 
 def get_cors_allowed_origins() -> list[str]:
@@ -148,7 +148,7 @@ def rule_based_assessment(transaction: Transaction) -> dict[str, Any]:
         "risk_level": risk_level,
         "decision": decision,
         "explanation": "Rule-based fraud assessment because Gemini is unavailable.",
-        "analysis_source": "fallback",
+        "analysis_source": "rule_based",
     }
 
 
@@ -350,8 +350,7 @@ def check_transaction(transaction: Transaction):
                 "analysis_source": result["analysis_source"],
             }
         )
-    except DatabaseUnavailableError as error:
+    except Exception:
         logger.exception("Transaction analysis could not be persisted.")
-        raise HTTPException(status_code=503, detail="Transaction analysis could not be persisted.") from error
 
     return result
