@@ -1,6 +1,7 @@
 """Static contract tests for the manually applied PostgreSQL migrations."""
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -122,6 +123,37 @@ class MigrationContractTests(unittest.TestCase):
         executable = "\n".join(line for line in sql.upper().splitlines() if not line.lstrip().startswith("--"))
         self.assertIsNone(re.search(r"(?m)^\s*(DROP|TRUNCATE|DELETE|UPDATE)\b", executable))
         self.assertIn("idx_transactions_user_idempotency", self.read("003_transactions_idempotency_index.sql"))
+
+    def test_ledger_migration_has_immutable_metadata_contract(self):
+        sql = self.read("005_schema_migration_ledger.sql")
+        upper_sql = sql.upper()
+        self.assertIn("BEGIN;", upper_sql)
+        self.assertIn("COMMIT;", upper_sql)
+        self.assertIn("CREATE SCHEMA IF NOT EXISTS SENTINELPAY_META", upper_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS SENTINELPAY_META.SCHEMA_MIGRATIONS", upper_sql)
+        self.assertIn("VERSION INTEGER PRIMARY KEY", upper_sql)
+        self.assertIn("MIGRATION_NAME TEXT NOT NULL UNIQUE", upper_sql)
+        self.assertIn("CHECKSUM CHAR(64) NOT NULL", upper_sql)
+        self.assertIn("APPLIED_AT TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP", upper_sql)
+        self.assertNotRegex(upper_sql, r"(?m)^\s*(DROP|TRUNCATE|DELETE|UPDATE)\b")
+
+    def test_historical_migrations_are_byte_for_byte_unchanged_from_head(self):
+        historical = [
+            "migrations/000_baseline_sentinelpay_schema.sql",
+            "migrations/000_preflight_sentinelpay_schema.sql",
+            "migrations/001_roles_and_idempotency.sql",
+            "migrations/002_exact_money_and_transaction_atomicity.sql",
+            "migrations/003_transactions_idempotency_index.sql",
+            "migrations/004_transaction_integrity_constraints.sql",
+        ]
+        result = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", *historical],
+            cwd=MIGRATIONS.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

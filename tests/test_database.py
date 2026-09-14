@@ -1,13 +1,14 @@
 import os
 import sqlite3
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+
+import psycopg
 
 from backend import database
+from backend.config import DatabaseSettings
 
 
 RECORD = {
@@ -27,22 +28,21 @@ RECORD = {
 
 
 class DatabaseTests(unittest.TestCase):
-    def postgres_modules(self, connect):
-        """Provide the small psycopg surface get_connection imports."""
-        driver = types.ModuleType("psycopg")
-        rows = types.ModuleType("psycopg.rows")
+    def setUp(self):
+        database.close_database_pool()
 
-        class DriverError(Exception):
-            pass
+    def tearDown(self):
+        database.close_database_pool()
 
-        class OperationalError(DriverError):
-            pass
-
-        driver.connect = connect
-        driver.Error = DriverError
-        driver.OperationalError = OperationalError
-        rows.dict_row = object()
-        return {"psycopg": driver, "psycopg.rows": rows}, OperationalError
+    def fake_pool(self, connection: object | None = None, error: Exception | None = None):
+        pool = MagicMock()
+        manager = MagicMock()
+        if error:
+            manager.__enter__.side_effect = error
+        else:
+            manager.__enter__.return_value = connection or MagicMock()
+        pool.connection.return_value = manager
+        return pool
 
     def test_sqlite_local_mode_saves_and_retrieves_transactions(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -223,14 +223,13 @@ class DatabaseTests(unittest.TestCase):
 
     def test_vercel_uses_postgresql_database_url_without_opening_sqlite(self):
         postgres_url = "postgresql://database.example.invalid/sentinelpay"
-        managed_connection = MagicMock()
         postgres_connection = MagicMock()
-        managed_connection.__enter__.return_value = postgres_connection
+        pool = self.fake_pool(postgres_connection)
 
         with (
             patch.object(database, "DATABASE_URL", postgres_url),
             patch.dict(os.environ, {"VERCEL": "1", "VERCEL_ENV": "production"}, clear=False),
-            patch("psycopg.connect", return_value=managed_connection) as connect,
+            patch("backend.database.create_postgres_pool", return_value=pool) as create_pool,
             patch("backend.database.sqlite3.connect") as sqlite_connect,
         ):
             self.assertTrue(database.persistence_enabled())
@@ -238,8 +237,8 @@ class DatabaseTests(unittest.TestCase):
             with database.get_connection() as connection:
                 self.assertIs(connection, postgres_connection)
 
-        connect.assert_called_once()
-        self.assertEqual(connect.call_args.args[0], postgres_url)
+        create_pool.assert_called_once()
+        pool.connection.assert_called_once()
         sqlite_connect.assert_not_called()
 
     def test_vercel_without_database_url_disables_persistence(self):
@@ -254,48 +253,175 @@ class DatabaseTests(unittest.TestCase):
         sqlite_connect.assert_not_called()
 
     def test_postgres_action_resource_not_found_is_preserved(self):
-        managed_connection = MagicMock()
-        modules, _ = self.postgres_modules(MagicMock(return_value=managed_connection))
+        pool = self.fake_pool()
         with (
             patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
-            patch.dict(sys.modules, modules),
+            patch("backend.database.create_postgres_pool", return_value=pool),
         ):
             with self.assertRaises(database.ActionResourceNotFoundError):
                 with database.get_connection():
                     raise database.ActionResourceNotFoundError("Transaction not found")
 
     def test_postgres_connection_failure_maps_to_database_unavailable(self):
-        modules, operational_error = self.postgres_modules(MagicMock())
-        modules["psycopg"].connect.side_effect = operational_error("offline")
+        operational_error = psycopg.OperationalError("offline")
+        pool = self.fake_pool(error=operational_error)
 
         with (
             patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
-            patch.dict(sys.modules, modules),
+            patch("backend.database.create_postgres_pool", return_value=pool),
         ):
             with self.assertRaises(database.DatabaseUnavailableError) as raised:
                 with database.get_connection():
                     pass
 
-        self.assertIsInstance(raised.exception.__cause__, operational_error)
+        self.assertIs(raised.exception.__cause__, operational_error)
 
     def test_postgres_successful_connection_behavior_is_unchanged(self):
-        managed_connection = MagicMock()
         postgres_connection = MagicMock()
-        managed_connection.__enter__.return_value = postgres_connection
-        modules, _ = self.postgres_modules(MagicMock(return_value=managed_connection))
+        pool = self.fake_pool(postgres_connection)
         with (
             patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
-            patch.dict(sys.modules, modules),
+            patch("backend.database.create_postgres_pool", return_value=pool),
         ):
             with database.get_connection() as connection:
                 self.assertIs(connection, postgres_connection)
 
-    def test_postgres_unexpected_operation_error_is_not_relabelled(self):
-        managed_connection = MagicMock()
-        modules, _ = self.postgres_modules(MagicMock(return_value=managed_connection))
+        postgres_connection.execute.assert_has_calls(
+            [
+                call("SELECT set_config('statement_timeout', %s, true)", ("15000",)),
+                call(
+                    "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+                    ("30000",),
+                ),
+            ]
+        )
+
+    def test_postgres_timeout_configuration_is_applied_on_every_checkout(self):
+        settings = DatabaseSettings(1, 3, 8, 4, 12000, 24000)
+        postgres_connection = MagicMock()
+        pool = self.fake_pool(postgres_connection)
         with (
             patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
-            patch.dict(sys.modules, modules),
+            patch("backend.database.DatabaseSettings.from_environment", return_value=settings),
+            patch("backend.database.create_postgres_pool", return_value=pool),
+        ):
+            with database.get_connection():
+                pass
+            with database.get_connection():
+                pass
+
+        self.assertEqual(pool.connection.call_count, 2)
+        self.assertEqual(
+            postgres_connection.execute.call_args_list,
+            [
+                call("SELECT set_config('statement_timeout', %s, true)", ("12000",)),
+                call(
+                    "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+                    ("24000",),
+                ),
+                call("SELECT set_config('statement_timeout', %s, true)", ("12000",)),
+                call(
+                    "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+                    ("24000",),
+                ),
+            ],
+        )
+
+    def test_postgres_timeout_configuration_failure_closes_connection(self):
+        configuration_error = psycopg.OperationalError("configuration failed")
+        postgres_connection = MagicMock()
+        postgres_connection.execute.side_effect = configuration_error
+        pool = self.fake_pool(postgres_connection)
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch("backend.database.create_postgres_pool", return_value=pool),
+            self.assertRaises(database.DatabaseUnavailableError) as raised,
+        ):
+            with database.get_connection():
+                pass
+
+        self.assertIs(raised.exception.__cause__, configuration_error)
+        postgres_connection.close.assert_called_once()
+
+    def test_postgres_pool_is_reused_then_closed_by_reset(self):
+        pool = self.fake_pool(MagicMock())
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch("backend.database.create_postgres_pool", return_value=pool) as create_pool,
+        ):
+            with database.get_connection():
+                pass
+            with database.get_connection():
+                pass
+            self.assertEqual(create_pool.call_count, 1)
+            self.assertEqual(pool.connection.call_count, 2)
+            database.close_database_pool()
+        pool.close.assert_called_once()
+
+    def test_postgres_pool_factory_applies_bounded_settings(self):
+        settings = DatabaseSettings(
+            pool_min_size=2,
+            pool_max_size=4,
+            pool_timeout_seconds=9,
+            connect_timeout_seconds=3,
+            statement_timeout_ms=12000,
+            idle_transaction_timeout_ms=24000,
+        )
+        created_pool = MagicMock()
+
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch("psycopg_pool.ConnectionPool", return_value=created_pool) as connection_pool,
+        ):
+            self.assertIs(database.create_postgres_pool(settings), created_pool)
+
+        connection_pool.assert_called_once_with(
+            conninfo="postgresql://database.example.invalid/sentinelpay",
+            min_size=2,
+            max_size=4,
+            timeout=9,
+            kwargs={"connect_timeout": 3},
+            open=True,
+        )
+
+    def test_pool_reset_forces_a_new_isolated_pool(self):
+        first_pool = self.fake_pool(MagicMock())
+        second_pool = self.fake_pool(MagicMock())
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch(
+                "backend.database.create_postgres_pool",
+                side_effect=[first_pool, second_pool],
+            ) as create_pool,
+        ):
+            with database.get_connection():
+                pass
+            database.close_database_pool()
+            with database.get_connection():
+                pass
+            database.close_database_pool()
+
+        self.assertEqual(create_pool.call_count, 2)
+        first_pool.close.assert_called_once()
+        second_pool.close.assert_called_once()
+
+    def test_postgres_pool_timeout_is_a_controlled_database_error(self):
+        from psycopg_pool import PoolTimeout
+
+        pool = self.fake_pool(error=PoolTimeout("timed out"))
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch("backend.database.create_postgres_pool", return_value=pool),
+            self.assertRaises(database.DatabaseUnavailableError),
+        ):
+            with database.get_connection():
+                pass
+
+    def test_postgres_unexpected_operation_error_is_not_relabelled(self):
+        pool = self.fake_pool()
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://database.example.invalid/sentinelpay"),
+            patch("backend.database.create_postgres_pool", return_value=pool),
         ):
             with self.assertRaisesRegex(RuntimeError, "unexpected operation"):
                 with database.get_connection():

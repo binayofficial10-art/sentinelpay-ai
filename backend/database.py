@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from backend.config import ConfigurationError, DatabaseSettings
+
 
 class DatabaseUnavailableError(RuntimeError):
     """Raised when persistent storage cannot be reached or configured."""
@@ -292,6 +294,9 @@ SQLITE_MIGRATION_COLUMNS = {
 SQLITE_USER_MIGRATION_COLUMNS = {"role": "TEXT NOT NULL DEFAULT 'viewer'"}
 _schema_lock = threading.Lock()
 _initialized_schema_keys: set[str] = set()
+_pool_lock = threading.Lock()
+_postgres_pool: Any | None = None
+_postgres_pool_key: tuple[str, DatabaseSettings] | None = None
 
 
 def using_sqlite() -> bool:
@@ -309,6 +314,68 @@ def sqlite_path() -> str:
     if DATABASE_URL.startswith("sqlite:///"):
         return DATABASE_URL.removeprefix("sqlite:///")
     return str(LOCAL_DATABASE_PATH)
+
+
+def close_database_pool() -> None:
+    """Close only the process-local PostgreSQL pool; SQLite has no pool."""
+    global _postgres_pool, _postgres_pool_key
+    with _pool_lock:
+        if _postgres_pool is not None:
+            _postgres_pool.close()
+        _postgres_pool = None
+        _postgres_pool_key = None
+
+
+def create_postgres_pool(settings: DatabaseSettings) -> Any:
+    """Create the sole production psycopg-pool adapter; construction is lazy."""
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError as error:
+        raise DatabaseUnavailableError("PostgreSQL pool support is not installed") from error
+    return ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=settings.pool_min_size,
+        max_size=settings.pool_max_size,
+        timeout=settings.pool_timeout_seconds,
+        # Neon poolers reject libpq startup `options`; enforce query limits
+        # after checkout instead, scoped to the transaction below.
+        kwargs={"connect_timeout": settings.connect_timeout_seconds},
+        open=True,
+    )
+
+
+def _get_postgres_pool() -> tuple[Any, DatabaseSettings]:
+    global _postgres_pool, _postgres_pool_key
+    try:
+        settings = DatabaseSettings.from_environment()
+    except (ImportError, ConfigurationError) as error:
+        raise DatabaseUnavailableError("PostgreSQL pool configuration is unavailable") from error
+    key = (DATABASE_URL, settings)
+    with _pool_lock:
+        if _postgres_pool is None or _postgres_pool_key != key:
+            if _postgres_pool is not None:
+                _postgres_pool.close()
+            _postgres_pool = create_postgres_pool(settings)
+            _postgres_pool_key = key
+    return _postgres_pool, settings
+
+
+def _configure_postgres_connection(connection: Any, settings: DatabaseSettings) -> None:
+    """Apply per-transaction server limits without unsafe startup parameters."""
+    try:
+        connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(settings.statement_timeout_ms),),
+        )
+        connection.execute(
+            "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+            (str(settings.idle_transaction_timeout_ms),),
+        )
+    except Exception:
+        # A connection that was not fully configured must not return to normal
+        # pool use. psycopg-pool will replace this closed physical connection.
+        connection.close()
+        raise
 
 
 @contextmanager
@@ -330,20 +397,38 @@ def get_connection() -> Iterator[Any]:
         return
 
     try:
-        import psycopg
-        from psycopg.rows import dict_row
-    except ImportError as error:
-        raise DatabaseUnavailableError("PostgreSQL support is not installed") from error
-
-    try:
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as connection:
+        pool, settings = _get_postgres_pool()
+        with pool.connection(timeout=settings.pool_timeout_seconds) as connection:
+            _configure_postgres_connection(connection, settings)
             yield connection
     except ActionResourceNotFoundError:
         # A domain result from an operation inside this context is not a
         # connectivity failure. Route handlers map it to a controlled 404.
         raise
-    except psycopg.Error as error:
-        raise DatabaseUnavailableError("Could not connect to DATABASE_URL") from error
+    except DatabaseUnavailableError:
+        raise
+    except Exception as error:
+        if type(error).__module__.startswith(("psycopg", "psycopg_pool")):
+            raise DatabaseUnavailableError("Could not connect to DATABASE_URL") from error
+        raise
+
+
+def database_readiness() -> dict[str, Any]:
+    """Return safe dependency status without disclosing connection details."""
+    if not persistence_enabled():
+        return {"ready": False, "database": "unavailable", "schema": "unknown"}
+    try:
+        with get_connection() as connection:
+            connection.execute("SELECT 1")
+            if using_sqlite():
+                return {"ready": True, "database": "connected", "schema": "local"}
+            row = connection.execute(
+                "SELECT max(version) FROM sentinelpay_meta.schema_migrations"
+            ).fetchone()
+            version = row[0] if row else None
+            return {"ready": version == 5, "database": "connected", "schema": "current" if version == 5 else "outdated"}
+    except Exception:
+        return {"ready": False, "database": "unavailable", "schema": "unknown"}
 
 
 def initialize_database(connection: Any) -> None:

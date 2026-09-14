@@ -104,7 +104,7 @@ The exact decision is produced by the implemented Gemini or rule-based risk-anal
 Gemini is called only by the backend through the Gemini REST `generateContent` API. The browser never receives the API key and `frontend/script.js` sends only transaction data to the application API.
 
 - `GEMINI_API_KEY` is read from the server environment.
-- `GEMINI_MODEL` selects the Gemini model; the current application default is `gemini-3.7-flash`.
+- `GEMINI_MODEL` selects the Gemini model; the current application default is `gemini-3.6-flash`.
 - The request asks for JSON output and contains no automatic function calling, tools, or function declarations.
 - The backend validates required fields, allowed values, score range, and explanation before using a Gemini response.
 - Gemini errors are logged server-side without logging the API key; the client receives a safe rule-based fallback assessment.
@@ -115,7 +115,7 @@ Use only placeholder values in local configuration. Do not commit real credentia
 
 ```dotenv
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-3.7-flash
+GEMINI_MODEL=gemini-3.6-flash
 CORS_ALLOWED_ORIGINS=
 FRONTEND_API_BASE_URL=
 DATABASE_URL=
@@ -133,7 +133,7 @@ RATE_LIMIT_AUTHENTICATED_WINDOW_SECONDS=60
 | Variable | Required | Description |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | No | Server-side Gemini credential. Without it, rule-based analysis remains available. |
-| `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.7-flash`. |
+| `GEMINI_MODEL` | No | Gemini model name. The current default is `gemini-3.6-flash`. |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated allowed origins for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
 | `FRONTEND_API_BASE_URL` | No | Public HTTPS API origin only for an intentionally separate frontend. Leave empty for the included same-origin frontend. |
 | `DATABASE_URL` | No locally; required on Vercel | Hosted PostgreSQL connection string for authentication, history, shared rate limits, and audit logs. Vercel must not use a file-based SQLite path. |
@@ -323,11 +323,12 @@ The project is configured as one Vercel deployment. `vercel.json` includes the `
 
 1. In [Vercel](https://vercel.com/new), choose **Add New** > **Project** and import `binayofficial10-art/sentinelpay-ai`.
 2. Keep the repository root as the project root. Vercel installs `requirements.txt` and runs the Python entry point in `app.py`.
-3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for Production and/or Preview. Optionally set `GEMINI_MODEL=gemini-3.7-flash`.
-4. For persistent production history, configure a PostgreSQL `DATABASE_URL`. Without it, analysis endpoints continue to work but history is not persisted in Vercel's serverless filesystem.
-5. Deploy the project.
-6. Test `https://<your-domain>/health`, `https://<your-domain>/`, and `https://<your-domain>/frontend/`.
-7. Submit the transaction form from both a phone and laptop browser. Confirm the displayed result identifies Gemini or the fallback source.
+3. In **Settings** > **Environment Variables**, add `GEMINI_API_KEY` for Production and/or Preview. Optionally set `GEMINI_MODEL=gemini-3.6-flash`.
+4. Configure a hosted PostgreSQL `DATABASE_URL` and a strong random `SECURITY_HASH_SECRET`. Authentication and transaction analysis fail closed on Vercel when durable storage is unavailable.
+5. Run `python -m backend.migrations status`, then `python -m backend.migrations apply` for a clean database or the documented preflight plus `python -m backend.migrations adopt-existing` for a verified legacy schema.
+6. Deploy the project.
+7. Test `https://<your-domain>/health`, `https://<your-domain>/readiness`, `https://<your-domain>/`, and `https://<your-domain>/frontend/`.
+8. Submit the transaction form from both a phone and laptop browser. Confirm the displayed result identifies Gemini or the fallback source.
 
 The included frontend calls the same HTTPS origin. For a deliberately separate frontend host, set its HTTPS origin in `CORS_ALLOWED_ORIGINS` and configure the `sentinelpay-api-base-url` metadata value in the frontend; do not use wildcard CORS for that deployment.
 
@@ -340,15 +341,15 @@ Automated tests are in `tests/test_transaction_check.py` and `tests/test_databas
 - Submit a high-risk transaction and inspect the displayed assessment.
 - With a valid configured Gemini key, verify that a valid Gemini response reports `analysis_source: "gemini"`.
 - Without a key, with an unavailable Gemini service, or with a quota/rate-limit response, verify that the request still returns an assessment with `analysis_source: "rule_based"`.
-- After deployment, verify `/health`, `/frontend/`, `POST /transaction/check`, and history behavior against the configured database.
+- After deployment, verify `/health`, `/readiness`, `/frontend/`, `POST /transaction/check`, and history behavior against the configured database.
 
 ## 14. Error Handling
 
 - If `GEMINI_API_KEY` is absent, the backend uses the rule-based assessment.
 - Gemini HTTP, network, malformed-response, invalid-model, authentication, and quota/rate-limit failures are logged server-side with useful diagnostic details but without the API key.
 - Gemini `429`, `500`, `502`, `503`, and `504` failures use a small bounded retry count with exponential backoff and jitter. If Gemini still fails, the backend returns the rule-based fallback.
-- The `/transaction/check` endpoint keeps a completed assessment even if saving transaction history fails.
-- If a configured history database cannot be reached, history endpoints return a `503` response. On Vercel without an external database, history is safely disabled and returns no records rather than using local SQLite storage.
+- The `/transaction/check` endpoint fails closed with a safe `503` if its audit-grade transaction record cannot be persisted.
+- If the configured database cannot be reached, authenticated storage-backed endpoints return a safe `503`. Vercel never falls back to its ephemeral local filesystem.
 - Standard FastAPI/Pydantic validation rejects invalid transaction request fields.
 
 ## 15. Security Notes

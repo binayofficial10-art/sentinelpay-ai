@@ -62,7 +62,7 @@ class TransactionCheckTests(DatabaseTestCase):
         self.assertIn("unauthorized_request", [event["event_type"] for event in events])
 
     def test_gemini_success_returns_200_and_gemini_provider(self):
-        with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "gemini-3.7-flash"}), patch("backend.main.request_gemini", return_value=gemini_response())):
+        with (patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": "gemini-3.6-flash"}), patch("backend.main.request_gemini", return_value=gemini_response())):
             response = self.post_transaction()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["analysis_source"], "gemini")

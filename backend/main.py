@@ -44,6 +44,8 @@ from backend.database import (
     set_review_decision_idempotent,
     update_alert_status_idempotent,
     persistence_enabled,
+    database_readiness,
+    close_database_pool,
 )
 from backend.auth import (
     AuthenticationError,
@@ -66,13 +68,13 @@ from backend.security import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 GEMINI_MAX_RETRIES = 2
 GEMINI_RETRY_BASE_DELAY_SECONDS = 0.25
 GEMINI_RETRY_JITTER_SECONDS = 0.1
-GEMINI_REQUEST_TIMEOUT_SECONDS = 3
+GEMINI_REQUEST_TIMEOUT_SECONDS = 12
 GEMINI_MAX_RETRY_AFTER_SECONDS = 1
 SESSION_COOKIE_NAME = "sentinelpay_session"
 MONEY_SCALE = Decimal("0.01")
@@ -174,7 +176,7 @@ def get_gemini_configuration() -> tuple[str | None, str]:
     model = os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
     if model.startswith("GEMINI_MODEL=") or model.startswith("models/") or "/" in model:
         raise GeminiRequestError(
-            "GEMINI_MODEL must be a bare model name (for example, gemini-3.7-flash)"
+            "GEMINI_MODEL must be a bare model name (for example, gemini-3.6-flash)"
         )
     return key, model
 
@@ -411,6 +413,20 @@ def frontend_config():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/readiness")
+def readiness():
+    """Dependency readiness; liveness remains intentionally independent."""
+    result = database_readiness()
+    if not result["ready"]:
+        raise HTTPException(status_code=503, detail="Service dependencies are not ready.")
+    return {"status": "ready", "database": result["database"], "schema": result["schema"]}
+
+
+@app.on_event("shutdown")
+def shutdown_database_pool() -> None:
+    close_database_pool()
 
 
 @app.get("/system-status")
